@@ -4,6 +4,10 @@ All notable changes to `aocore` are documented here.
 
 ## [Unreleased]
 
+- **Fixed: the backend threading test failed when `AOCORE_FFT_WORKERS` or
+  `AOCORE_BLAS_THREADS` was set in the environment**, as on a benchmark host
+  that pins thread counts. It now clears those overrides itself.
+
 ## [0.1.3] - 2026-10-07
 
 Additive release; the contract stays at v1.1. Gaps found while moving the
