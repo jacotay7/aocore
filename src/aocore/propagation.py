@@ -235,6 +235,7 @@ class MFTPropagator(Propagator):
         self._axt = xp.asarray(np.swapaxes(ax, -1, -2), dtype=cdt)
         self._ayh = xp.asarray(np.conj(np.swapaxes(ay, -1, -2)), dtype=cdt)
         self._axc = xp.asarray(np.conj(ax), dtype=cdt)
+        self._expanded: dict[tuple[tuple[int, ...], bool], tuple[Any, Any]] = {}
 
     def _matrix(self, axis: int, big: float) -> np.ndarray:
         n, m = self.in_shape[axis], self.out_shape[axis]
@@ -247,18 +248,55 @@ class MFTPropagator(Propagator):
         ny, nx = self.in_shape
         return float(field.size // (ny * nx)) * (my * ny * nx + my * nx * mx)
 
+    def _matrices(self, field: Any, adjoint: bool) -> tuple[Any, Any]:
+        """The left and right matrices, expanded to the field's batch on a GPU.
+
+        CuPy's ``matmul`` is ~130 us slower per call when it has to broadcast
+        the matrices over leading field axes (e.g. diversity channels) than
+        for operands of equal batch shape. Expanding the matrices once runs
+        the same batched cuBLAS products (bit-identical results), at the cost
+        of keeping a copy per field batch shape; copies over 32 MiB are not
+        made and a handful of shapes are kept.
+        """
+        left, right = (self._ayh, self._axc) if adjoint else (self._ay, self._axt)
+        batch = tuple(field.shape[:-2])
+        if not self.backend.is_gpu or batch == left.shape[:-2]:
+            return left, right
+        key = (batch, adjoint)
+        cached = self._expanded.get(key)
+        if cached is not None:
+            return cached
+        try:
+            full = np.broadcast_shapes(batch, left.shape[:-2])
+        except ValueError:
+            return left, right  # let matmul raise its usual error
+        per_batch = math.prod(left.shape[-2:]) + math.prod(right.shape[-2:])
+        nbytes = math.prod(full) * per_batch * left.dtype.itemsize
+        if full != batch or nbytes > 32 * 2**20:
+            return left, right
+        xp = self.backend.xp
+        cached = tuple(
+            xp.ascontiguousarray(xp.broadcast_to(m, (*full, *m.shape[-2:]))) for m in (left, right)
+        )
+        if len(self._expanded) >= 4:
+            self._expanded.clear()
+        self._expanded[key] = cached
+        return cached
+
     def forward(self, field: Any) -> Any:
         xp = self.backend.xp
+        left, right = self._matrices(field, adjoint=False)
         with self.backend.blas_limit(self._work(field)):
-            return xp.matmul(xp.matmul(self._ay, field), self._axt)
+            return xp.matmul(xp.matmul(left, field), right)
 
     def adjoint(self, field: Any) -> Any:
         xp = self.backend.xp
         my, mx = self.out_shape
         ny, nx = self.in_shape
         work = float(field.size // (my * mx)) * (ny * my * mx + ny * mx * nx)
+        left, right = self._matrices(field, adjoint=True)
         with self.backend.blas_limit(work):
-            return xp.matmul(xp.matmul(self._ayh, field), self._axc)
+            return xp.matmul(xp.matmul(left, field), right)
 
 
 # ----------------------------------------------------------- focal plane

@@ -148,3 +148,26 @@ def test_per_wavelength_fft_engines_fill_one_output(device: str, rng) -> None:
         np.testing.assert_array_equal(to_numpy(forward[:, i]), to_numpy(engine.forward(u[:, i])))
         np.testing.assert_array_equal(to_numpy(adjoint[:, i]), to_numpy(engine.adjoint(v[:, i])))
     assert _adjoint_gap(prop, rng, lead=(2, 3)) < 1e-12
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision", ["single", "double"])
+def test_gpu_mft_expanded_matrices_are_bitwise_identical(precision: str, rng) -> None:
+    be = get_backend("gpu", precision)
+    xp = be.xp
+    stack = MFTPropagator(24, (20, 18), [40.0, 47.5, 52.0], stack=True, backend=be)
+    single = MFTPropagator(24, (20, 18), 41.0, backend=be)
+    for prop, lead in [(stack, (2, 3)), (stack, (4, 2, 3)), (single, (2,)), (single, ())]:
+        u = be.asarray(_cplx(rng, (*lead, 24, 24)), dtype="complex")
+        v = be.asarray(_cplx(rng, (*lead, 20, 18)), dtype="complex")
+        plain_forward = xp.matmul(xp.matmul(prop._ay, u), prop._axt)
+        plain_adjoint = xp.matmul(xp.matmul(prop._ayh, v), prop._axc)
+        for _ in range(2):  # build, then reuse the cached expansion
+            np.testing.assert_array_equal(to_numpy(prop.forward(u)), to_numpy(plain_forward))
+            np.testing.assert_array_equal(to_numpy(prop.adjoint(v)), to_numpy(plain_adjoint))
+    # A field broadcast against the wavelength axis keeps the plain product.
+    u = be.asarray(_cplx(rng, (24, 24)), dtype="complex")
+    assert stack.forward(u).shape == (3, 20, 18)
+    for i in range(6):  # the cache stays small
+        stack.forward(be.zeros((i + 1, 3, 24, 24), "complex"))
+    assert len(stack._expanded) <= 4
