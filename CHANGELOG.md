@@ -2,6 +2,15 @@
 
 All notable changes to `aocore` are documented here.
 
+## [0.1.1] - 2026-10-06
+
+- **Fixed: `check_wind_motion` could report no motion for a correctly moving
+  screen.** It located the shift with an FFT cross-correlation. Turbulence is
+  red and the frames are not periodic, so the peak was dominated by the
+  largest scales and could sit at zero shift (seen with pyturb, wind from 90
+  degrees). The check now searches integer shifts by least squares over the
+  frames' interior, and its test uses red, non-periodic screens.
+
 ## [0.1.0] - 2026-10-06
 
 First release.

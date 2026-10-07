@@ -247,21 +247,31 @@ def check_wind_motion(
     ``frames(direction_deg)`` builds a single frozen-flow layer blowing from
     ``direction_deg`` and returns ``(frame_0, frame_1, displacement_pixels)``:
     two OPD maps one time step apart and the expected displacement magnitude in
-    pixels (wind speed x dt / pitch). Checked for winds from +x (0 degrees) and
-    from +y (90 degrees) by cross-correlation.
+    pixels (wind speed x dt / pitch, a few pixels, and well below the frame
+    size). Checked for winds from +x (0 degrees) and from +y (90 degrees) by a
+    least-squares search of integer shifts over the frames' interior.
     """
 
-    def shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
-        fa, fb = np.fft.fft2(a - a.mean()), np.fft.fft2(b - b.mean())
-        corr = np.real(np.fft.ifft2(np.conj(fa) * fb))
-        iy, ix = np.unravel_index(np.argmax(corr), corr.shape)
-        ny, nx = corr.shape
-        return float((iy + ny // 2) % ny - ny // 2), float((ix + nx // 2) % nx - nx // 2)
+    def shift(a: np.ndarray, b: np.ndarray, reach: int) -> tuple[float, float]:
+        # Least-squares integer shift over the frames' interior. Turbulence is
+        # red and the frames are not periodic, so an FFT cross-correlation peak
+        # is dominated by the largest scales and can sit at zero shift.
+        margin = reach + 1
+        target = b[margin:-margin, margin:-margin]
+        best = (np.inf, 0, 0)
+        for dy in range(-reach, reach + 1):
+            for dx in range(-reach, reach + 1):
+                moved = np.roll(a, (dy, dx), axis=(0, 1))[margin:-margin, margin:-margin]
+                err = float(np.mean((moved - target) ** 2))
+                if err < best[0]:
+                    best = (err, dy, dx)
+        return float(best[1]), float(best[2])
 
     out = {}
     for direction, expect in ((0.0, (0.0, -1.0)), (90.0, (-1.0, 0.0))):
         a, b, pixels = frames(direction)
-        dy, dx = shift(_as_host(a).astype(np.float64), _as_host(b).astype(np.float64))
+        reach = int(np.ceil(pixels)) + 2
+        dy, dx = shift(_as_host(a).astype(np.float64), _as_host(b).astype(np.float64), reach)
         ey, ex = expect[0] * pixels, expect[1] * pixels
         if abs(dy - ey) > tol_pixels or abs(dx - ex) > tol_pixels:
             _fail(

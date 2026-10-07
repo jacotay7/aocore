@@ -115,8 +115,9 @@ def test_zernike_basis_catches_transposition_and_double_normalisation() -> None:
 
 
 def test_wind_motion() -> None:
-    rng = np.random.default_rng(1)
-    screen = rng.standard_normal((64, 64))
+    # Red, non-periodic screens like real turbulence (2-D random walks), so an
+    # estimator dominated by the largest scales would miss the shift.
+    rng_big = np.random.default_rng(2)
 
     def frames(direction: float, axis_zero_is_x: bool = False):
         theta = math.radians(direction)
@@ -124,8 +125,10 @@ def test_wind_motion() -> None:
         if axis_zero_is_x:
             vx, vy = vy, vx
         # phi(x, t) = phi_0(x + v t): the pattern moves along -v.
-        moved = np.roll(screen, (-round(vy), -round(vx)), axis=(0, 1))
-        return screen, moved, 3.0
+        big = np.cumsum(np.cumsum(rng_big.standard_normal((80, 80)), axis=0), axis=1)
+        first = big[8:72, 8:72]
+        moved = big[8 + round(vy) : 72 + round(vy), 8 + round(vx) : 72 + round(vx)]
+        return first, moved, 3.0
 
     cf.check_wind_motion(frames)
     with pytest.raises(cf.ConformanceError, match=r"6\.1"):
