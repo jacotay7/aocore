@@ -132,9 +132,11 @@ boundary.
 8.3 **Randomness.** Randomness comes from an explicit seed or
 `numpy.random.Generator`, never from global state.
 
-8.4 **Licensing.** Every package is MIT-licensed. Never copy code from
-GPL, LGPL, non-commercial or CeCILL sources, and never add a
-patent-encumbered algorithm without the maintainer's explicit decision.
+8.4 **Licensing.** Every package is MIT-licensed except pyRTC, which is
+GPL-3.0-or-later. pyRTC may import the MIT packages. The MIT packages never
+depend on pyRTC and never copy code from it, or from any other GPL, LGPL,
+non-commercial or CeCILL source. Never add a patent-encumbered algorithm
+without the maintainer's explicit decision.
 
 ## 9. Ownership
 
