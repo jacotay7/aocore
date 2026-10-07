@@ -161,3 +161,15 @@ def test_workspace_reuses_and_bounds_its_arrays() -> None:
     assert _workspace("test", (4, 4), np.float64) is not a  # evicted
     big = (65 * 2**20) // 8 + 1
     assert _workspace("big", (big,), np.float64) is not _workspace("big", (big,), np.float64)
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.complex64, np.complex128])
+def test_gpu_dot_rounds_exactly_like_vdot(dtype, rng) -> None:
+    be = get_backend("gpu")
+    for size in (1, 1000, 100003):
+        a, b = rng.standard_normal((2, size)) + (1j * rng.standard_normal((2, size)))
+        if np.dtype(dtype).kind == "f":
+            a, b = a.real, b.real
+        a, b = be.xp.asarray(a.astype(dtype)), be.xp.asarray(b.astype(dtype))
+        assert be.dot(a, b) == float(be.xp.vdot(a, b).real)

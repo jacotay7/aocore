@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 import pytest
 
 import aocore as ac
+import aocore.backend as aocore_backend
 from aocore.backend import _blas_threads, _cpu_workers
 from conftest import devices
 
@@ -63,6 +65,15 @@ def test_backend_fft_helpers_and_threading(monkeypatch) -> None:
     assert _blas_threads(1e12) == 2
     monkeypatch.delenv("AOCORE_BLAS_THREADS")
     assert 1 <= _blas_threads(1e12) <= 8
+    # Without SMT every usable CPU is a core: up to 8 threads for big products.
+    monkeypatch.setattr(aocore_backend, "_smt_active", lambda: False)
+    monkeypatch.setattr(aocore_backend, "_usable_cpus", lambda: 12)
+    assert _blas_threads(1e6) == 4
+    assert _blas_threads(1e8) == 8
+    monkeypatch.setattr(aocore_backend, "_usable_cpus", lambda: 2)
+    assert _blas_threads(1e8) == 2
+    monkeypatch.setattr(aocore_backend, "_smt_active", lambda: True)
+    assert _blas_threads(1e8) == min(4, max(1, (os.cpu_count() or 2) // 2))
     assert repr(be) == "Backend(device='cpu', precision='double')"
     assert ac.get_backend(None).device == "cpu"
     assert ac.get_backend("cuda" if ac.gpu_available() else "cpu").device in ("cpu", "gpu")
