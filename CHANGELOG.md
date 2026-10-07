@@ -2,7 +2,7 @@
 
 All notable changes to `aocore` are documented here.
 
-## [Unreleased]
+## [0.1.0] - 2026-10-06
 
 First release.
 
