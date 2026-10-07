@@ -11,6 +11,8 @@ from typing import Any
 
 import numpy as np
 
+from .backend import BackendLike, get_backend
+
 __all__ = [
     "ARCSEC_TO_RAD",
     "RAD_TO_ARCSEC",
@@ -29,22 +31,64 @@ ARCSEC_TO_RAD = math.pi / 648000.0
 RAD_TO_ARCSEC = 648000.0 / math.pi
 
 
-def centered_coordinates(n: int, pitch: float = 1.0, offset: float = 0.0) -> np.ndarray:
-    """Pixel-centre coordinates ``(i - (n - 1) / 2 + offset) * pitch`` (CONVENTIONS 1.2)."""
+def centered_coordinates(
+    n: int,
+    pitch: float = 1.0,
+    offset: float = 0.0,
+    *,
+    dtype: Any = None,
+    backend: BackendLike = None,
+) -> Any:
+    """Pixel-centre coordinates ``(i - (n - 1) / 2 + offset) * pitch`` (CONVENTIONS 1.2).
+
+    The values are computed in float64 and then cast, so a float32 grid
+    equals the float32 cast of the float64 one on either device.
+
+    Parameters
+    ----------
+    n:
+        Number of pixels along the axis.
+    pitch:
+        Pixel pitch (any unit; metres for pupil planes).
+    offset:
+        Shift of the grid in pixels.
+    dtype:
+        Floating-point dtype of the result. Defaults to the backend's working
+        precision (:attr:`Backend.real_dtype`), which is float64 for the
+        default CPU backend.
+    backend:
+        Where to build the array: a :class:`~aocore.Backend` or a device name
+        (see :func:`~aocore.get_backend`). Default: host NumPy, double
+        precision.
+    """
     if n < 1:
         raise ValueError("n must be at least 1")
-    return (np.arange(n, dtype=np.float64) - (n - 1) / 2.0 + offset) * pitch
+    be = get_backend(backend)
+    xp = be.xp
+    coords = (xp.arange(n, dtype=xp.float64) - (n - 1) / 2.0 + offset) * pitch
+    return coords.astype(be.real_dtype if dtype is None else dtype, copy=False)
 
 
-def coordinate_grid(shape: Any, pitch: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+def coordinate_grid(
+    shape: Any,
+    pitch: float = 1.0,
+    *,
+    dtype: Any = None,
+    backend: BackendLike = None,
+) -> tuple[Any, Any]:
     """``(y, x)`` coordinate grids for a ``(ny, nx)`` array (CONVENTIONS 1.1-1.2).
 
-    ``x`` varies along axis 1 (columns) and ``y`` along axis 0 (rows).
+    ``x`` varies along axis 1 (columns) and ``y`` along axis 0 (rows). Both
+    are broadcast views of 1-D coordinate vectors (read-only on NumPy; copy
+    them before writing). ``dtype`` and
+    ``backend`` are as in :func:`centered_coordinates` (default: host
+    float64).
     """
     ny, nx = (int(shape), int(shape)) if np.ndim(shape) == 0 else (int(shape[0]), int(shape[1]))
-    y = centered_coordinates(ny, pitch)[:, None]
-    x = centered_coordinates(nx, pitch)[None, :]
-    return np.broadcast_to(y, (ny, nx)), np.broadcast_to(x, (ny, nx))
+    xp = get_backend(backend).xp
+    y = centered_coordinates(ny, pitch, dtype=dtype, backend=backend)[:, None]
+    x = centered_coordinates(nx, pitch, dtype=dtype, backend=backend)[None, :]
+    return xp.broadcast_to(y, (ny, nx)), xp.broadcast_to(x, (ny, nx))
 
 
 def centroid(image: Any) -> tuple[float, float]:

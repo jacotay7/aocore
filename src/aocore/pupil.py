@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 from .propagation import centered_coordinates
+from .sampling import block_mean
 
 __all__ = ["Pupil"]
 
@@ -226,7 +227,7 @@ class Pupil:
         ny, nx = self.shape
         if factor < 1 or ny % factor or nx % factor:
             raise ValueError(f"factor {factor} must divide the grid shape {self.shape}")
-        amp = self.amplitude.reshape(ny // factor, factor, nx // factor, factor).mean(axis=(1, 3))
+        amp = block_mean(self.amplitude, factor)
         seg = None
         if self.segments is not None:
             blocks = self.segments.reshape(ny // factor, factor, nx // factor, factor)

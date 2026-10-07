@@ -10,6 +10,44 @@ All notable changes to `aocore` are documented here.
   pyRTC or copy code from it. No rule for code changes, so the contract stays
   at v1.1.
 
+## [0.1.3] - 2026-10-07
+
+Additive release; the contract stays at v1.1. Gaps found while moving the
+sibling packages onto aocore.
+
+- **New: `rms_unweighted(opd, mask=None)` and `rms_tiptilt_removed(opd,
+  pupil)`**, the RMS variants CONVENTIONS 4.1 names. `rms_unweighted` is the
+  plain quadratic mean over the mask (or the whole array) with piston
+  included, as makewfs reports it. `rms_tiptilt_removed` is
+  intensity-weighted with piston, tip and tilt removed by weighted least
+  squares (equal to `rms(opd, pupil, "tiptilt")`). Both run on NumPy or CuPy
+  arrays without copying the OPD to the host, and ignore NaN outside the
+  pupil. Rule 4.1 now names them.
+- **Faster `block_sum`.** NumPy now reduces each axis separately, with
+  strided adds for factors up to 4; CuPy runs one kernel with a thread per
+  output pixel. It is 3-17x faster than 0.1.2 on NumPy and 1.4-4.7x on CuPy,
+  and matches or beats the factor-2 fast path makewfs kept. Integer sums are
+  exact and keep the dtype `sum` gives; float sums may differ in the last
+  bits because the addition order changed. See
+  `benchmarks/bench_block_sum.py`.
+- **New: `block_mean(array, factor)`**, the block average. `Pupil.downsampled`
+  uses it.
+- **New: `dtype=` and `backend=` on `centered_coordinates` and
+  `coordinate_grid`**, so callers can build coordinates on the GPU in their
+  working precision. Without them the result is host float64 as before.
+- **New conformance checks for rendered images:**
+  - `check_point_source_centring(render)` and
+    `check_point_source_flux(render)` take `render(shape) -> image`, for
+    packages whose images are analytic (getframes) rather than OPD-driven.
+    The OPD-based `check_image_centring` and `check_unit_flux` are
+    unchanged.
+  - `check_edge_flux_loss(render)` (rule 3.3) takes `render(shape,
+    position)`. It checks that a source centred on a window edge deposits
+    exactly the visible part of its light, compared with a larger window,
+    and about half of what a central source deposits. It catches PSF
+    renderers that renormalize clipped stamps or wrap light around the
+    window.
+
 ## [0.1.2] - 2026-10-07
 
 - **Changed: CONVENTIONS 7.1 (contract v1.1) recognizes both slope layouts in

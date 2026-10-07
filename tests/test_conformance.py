@@ -153,3 +153,111 @@ def test_slope_sign() -> None:
         cf.check_slope_sign(lambda o: slopes(o, interleave=True), **kw)
     with pytest.raises(ValueError, match="layout"):
         cf.check_slope_sign(slopes, layout="zigzag", **kw)
+
+
+# ------------------------------------------------- analytic point-source images
+def _erf_axis(n: int, centre: float, sigma: float) -> np.ndarray:
+    """Pixel-integrated 1-D Gaussian; pixel i spans i - (n-1)/2 -+ 1/2 (rule 1.2)."""
+    from scipy.special import erf
+
+    edges = np.arange(n + 1) - n / 2.0
+    return np.diff(0.5 * (1.0 + erf((edges - centre) / (sigma * math.sqrt(2.0)))))
+
+
+def _gaussian(
+    shape: tuple[int, int],
+    position: tuple[float, float] = (0.0, 0.0),
+    *,
+    sigma: float = 1.5,
+    renormalize: bool = False,
+    fftshift: bool = False,
+) -> np.ndarray:
+    """Unit-flux Gaussian, integrated over each pixel and clipped by the window."""
+    ny, nx = shape
+    cy, cx = position
+    if fftshift:  # axis on pixel n // 2 instead of (n - 1) / 2
+        cy, cx = cy + ny // 2 - (ny - 1) / 2, cx + nx // 2 - (nx - 1) / 2
+    image = np.outer(_erf_axis(ny, cy, sigma), _erf_axis(nx, cx, sigma))
+    return image / image.sum() if renormalize else image
+
+
+def _moffat(
+    shape: tuple[int, int],
+    position: tuple[float, float] = (0.0, 0.0),
+    *,
+    alpha: float = 2.0,
+    beta: float = 3.0,
+    renormalize: bool = False,
+    periodic: bool = False,
+) -> np.ndarray:
+    """Unit-flux Moffat sampled at pixel centres, as getframes renders it."""
+    y, x = coordinate_grid(shape)
+    dy, dx = y - position[0], x - position[1]
+    if periodic:  # an FFT model without padding wraps the light around
+        dy = (dy + shape[0] / 2) % shape[0] - shape[0] / 2
+        dx = (dx + shape[1] / 2) % shape[1] - shape[1] / 2
+    image = (beta - 1) / (math.pi * alpha**2) * (1 + (dx**2 + dy**2) / alpha**2) ** -beta
+    return image / image.sum() if renormalize else image
+
+
+def test_point_source_centring_catches_the_fftshift_convention() -> None:
+    found = cf.check_point_source_centring(lambda s: _gaussian(s))
+    assert abs(found["centroid_x"]) < 1e-9
+    cf.check_point_source_centring(lambda s: _moffat(s), shapes=[(48, 40)])
+    with pytest.raises(cf.ConformanceError, match=r"1\.3"):
+        cf.check_point_source_centring(lambda s: _gaussian(s, fftshift=True))
+    # Odd windows cannot tell the two conventions apart (documented).
+    cf.check_point_source_centring(lambda s: _gaussian(s, fftshift=True), shapes=[(33, 33)])
+
+
+def test_point_source_flux() -> None:
+    assert cf.check_point_source_flux(lambda s: _gaussian(s))["total"] == pytest.approx(1.0)
+    cf.check_point_source_flux(lambda s: 250.0 * _gaussian(s), flux=250.0)
+    with pytest.raises(cf.ConformanceError, match=r"3\.3"):
+        cf.check_point_source_flux(lambda s: 2 * _gaussian(s))
+    # A window too small for the PSF loses light: the check says so.
+    with pytest.raises(cf.ConformanceError, match=r"3\.3"):
+        cf.check_point_source_flux(lambda s: _gaussian(s, sigma=4.0), shape=(16, 16))
+
+
+def test_edge_flux_loss_passes_clipping_renderers() -> None:
+    found = cf.check_edge_flux_loss(lambda s, p: _gaussian(s, p))
+    assert found["worst_ratio"] == pytest.approx(0.5, abs=1e-6)
+    found = cf.check_edge_flux_loss(lambda s, p: _moffat(s, p), shape=(40, 48))
+    assert found["worst_ratio"] == pytest.approx(0.5, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda s, p: _gaussian(s, p, renormalize=True),
+        lambda s, p: _moffat(s, p, renormalize=True),
+        lambda s, p: _moffat(s, p, periodic=True),
+    ],
+    ids=["gaussian-renormalized", "moffat-renormalized", "moffat-wrapped"],
+)
+def test_edge_flux_loss_catches_renormalized_stamps(render) -> None:
+    with pytest.raises(cf.ConformanceError, match=r"3\.3"):
+        cf.check_edge_flux_loss(render)
+    # The comparison with a larger window catches it without the symmetry test.
+    with pytest.raises(cf.ConformanceError, match="renormalized away"):
+        cf.check_edge_flux_loss(render, symmetric=False)
+
+
+def test_edge_flux_loss_asymmetric_psf_and_errors() -> None:
+    def lopsided(shape, position, renormalize=False):
+        # Two blobs: the source's light is not symmetric about its position.
+        main = _gaussian(shape, position)
+        side = _gaussian(shape, (position[0] + 2.0, position[1] + 3.0))
+        image = 0.7 * main + 0.3 * side
+        return image / image.sum() if renormalize else image
+
+    with pytest.raises(cf.ConformanceError, match="about half"):
+        cf.check_edge_flux_loss(lopsided)
+    cf.check_edge_flux_loss(lopsided, symmetric=False)
+    with pytest.raises(cf.ConformanceError, match="renormalized away"):
+        cf.check_edge_flux_loss(lambda s, p: lopsided(s, p, True), symmetric=False)
+    with pytest.raises(cf.ConformanceError, match="no flux"):
+        cf.check_edge_flux_loss(lambda s, p: np.zeros(s))
+    with pytest.raises(ValueError, match="pad"):
+        cf.check_edge_flux_loss(lambda s, p: _gaussian(s, p), pad=0)

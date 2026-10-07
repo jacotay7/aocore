@@ -21,7 +21,9 @@ slopes. aocore makes sure they mean the same thing by them:
   - anti-aliased and segmented pupils with telescope presets;
   - FFT, matrix-Fourier, focal-plane and angular-spectrum propagators with
     exact adjoints;
-  - wavefront metrics, least-squares phase unwrapping, pixel binning and unit
+  - wavefront metrics (`rms`, `rms_unweighted`, `rms_tiptilt_removed`),
+    least-squares phase unwrapping, fast pixel binning (`block_sum`,
+    `block_mean`), coordinate grids built on either device, and unit
     constants.
 
 ```bash
@@ -34,7 +36,10 @@ import aocore as ac
 
 pupil = ac.Pupil.vlt(128)
 prop = ac.FocalPlanePropagator(pupil.shape, pupil.pitch, 1.6e-6, 1.6e-6 / 8 / 2, (64, 64))
-print(ac.rms(opd, pupil, remove="tiptilt"))  # CONVENTIONS 4.1
+print(ac.rms(opd, pupil))  # CONVENTIONS 4.1: weighted, piston removed
+print(ac.rms_unweighted(opd, pupil.mask))  # plain quadratic mean, piston included
+print(ac.rms_tiptilt_removed(opd, pupil))  # weighted, piston/tip/tilt removed
+y, x = ac.coordinate_grid(pupil.shape, pupil.pitch, backend="auto", dtype="float32")
 
 # In any package's tests:
 from aocore import conformance
