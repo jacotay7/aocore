@@ -64,9 +64,10 @@ def _cpu_workers(size: int = 1 << 30) -> int:
     One thread per ~16k elements, capped at the core count: small transforms
     lose more to thread start-up and contention than they gain (a 48x48 FFT
     is ~10x slower on 16 threads than on one when the cores are busy).
-    ``SOLVEPHASE_FFT_WORKERS`` fixes the count.
+    ``AOCORE_FFT_WORKERS`` (or the older ``SOLVEPHASE_FFT_WORKERS``) fixes
+    the count.
     """
-    env = os.environ.get("SOLVEPHASE_FFT_WORKERS")
+    env = os.environ.get("AOCORE_FFT_WORKERS") or os.environ.get("SOLVEPHASE_FFT_WORKERS")
     if env:
         return max(1, int(env))
     return max(1, min(os.cpu_count() or 1, size >> 14))
@@ -87,9 +88,10 @@ def _blas_threads(work: float) -> int:
     OpenBLAS defaults to one thread per logical CPU, which for the
     mid-sized complex products of the matrix Fourier transform is 2-4x slower
     than a few threads (hyper-threads and synchronization cost more than they
-    give). ``SOLVEPHASE_BLAS_THREADS`` fixes the count.
+    give). ``AOCORE_BLAS_THREADS`` (or the older ``SOLVEPHASE_BLAS_THREADS``)
+    fixes the count.
     """
-    env = os.environ.get("SOLVEPHASE_BLAS_THREADS")
+    env = os.environ.get("AOCORE_BLAS_THREADS") or os.environ.get("SOLVEPHASE_BLAS_THREADS")
     if env:
         return max(1, int(env))
     cores = max(1, (os.cpu_count() or 2) // 2)

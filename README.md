@@ -10,7 +10,7 @@ solvephase, shmpipeline-ao and pyRTC.
 The packages of the stack hand each other OPD maps, images, wind vectors and
 slopes. aocore makes sure they mean the same thing by them:
 
-- **[CONVENTIONS.md](CONVENTIONS.md)** is the contract: array axes, pixel
+- **[CONVENTIONS.md](https://github.com/jacotay7/aocore/blob/main/CONVENTIONS.md)** is the contract: array axes, pixel
   centres, units, propagation sign and normalization, RMS and Strehl
   definitions, Zernike orientation, wind and slope conventions, and who owns
   which primitive.
