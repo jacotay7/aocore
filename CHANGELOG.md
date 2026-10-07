@@ -4,6 +4,8 @@ All notable changes to `aocore` are documented here.
 
 ## [Unreleased]
 
+- **Added: `benchmarks/results/block_sum-neoverse-n1.md`**, `block_sum` timings
+  on an Arm Neoverse-N1 host with an RTX 4060 and an RTX A400.
 - **Fixed: the backend threading test failed when `AOCORE_FFT_WORKERS` or
   `AOCORE_BLAS_THREADS` was set in the environment**, as on a benchmark host
   that pins thread counts. It now clears those overrides itself.
