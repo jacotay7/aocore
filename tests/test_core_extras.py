@@ -33,6 +33,15 @@ def test_conventions_helpers() -> None:
 
 
 def test_backend_fft_helpers_and_threading(monkeypatch) -> None:
+    # The thread-count defaults are what is under test, so the caller's
+    # overrides must not leak in (a benchmark host may export them).
+    for name in (
+        "AOCORE_FFT_WORKERS",
+        "SOLVEPHASE_FFT_WORKERS",
+        "AOCORE_BLAS_THREADS",
+        "SOLVEPHASE_BLAS_THREADS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     be = ac.get_backend("cpu", "double")
     rng = np.random.default_rng(0)
     real = rng.standard_normal((2, 8, 6))
