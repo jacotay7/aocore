@@ -26,7 +26,14 @@ from .conventions import (
     phase_to_opd,
     strehl_marechal,
 )
-from .metrics import remove_modes, rms, strehl_from_rms, wavefront_error
+from .metrics import (
+    remove_modes,
+    rms,
+    rms_tiptilt_removed,
+    rms_unweighted,
+    strehl_from_rms,
+    wavefront_error,
+)
 from .propagation import (
     AngularSpectrumPropagator,
     FFTPropagator,
@@ -35,7 +42,7 @@ from .propagation import (
     Propagator,
 )
 from .pupil import Pupil
-from .sampling import block_sum
+from .sampling import block_mean, block_sum
 from .unwrap import unwrap_phase, wrap
 
 __all__ = [
@@ -51,6 +58,7 @@ __all__ = [
     "Pupil",
     "__version__",
     "backend_of",
+    "block_mean",
     "block_sum",
     "centered_coordinates",
     "centroid",
@@ -63,6 +71,8 @@ __all__ = [
     "phase_to_opd",
     "remove_modes",
     "rms",
+    "rms_tiptilt_removed",
+    "rms_unweighted",
     "strehl_from_rms",
     "strehl_marechal",
     "to_numpy",

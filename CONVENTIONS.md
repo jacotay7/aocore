@@ -75,8 +75,11 @@ Spiders, gaps and masks remove light.
 4.1 **RMS.** `rms(opd, pupil)` is weighted by pupil intensity, with piston
 removed:
 `sqrt(sum a^2 (opd - <opd>_a)^2 / sum a^2)`, where `<opd>_a` is the
-intensity-weighted mean. Variants say so in their name (`rms_unweighted`,
-`rms_tiptilt_removed`).
+intensity-weighted mean (`aocore.rms`). Variants say so in their name:
+`aocore.rms_unweighted(opd, mask)` is the plain quadratic mean over the mask
+with piston *included*, and `aocore.rms_tiptilt_removed(opd, pupil)` is
+intensity-weighted with piston, tip and tilt removed by weighted least
+squares.
 
 4.2 **Strehl.** `strehl_marechal(rms, lambda) = exp(-(2 pi rms / lambda)^2)`
 is the Maréchal approximation. A measured Strehl compares an image peak with

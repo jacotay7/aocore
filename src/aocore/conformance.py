@@ -15,12 +15,18 @@ Each ``check_*`` function raises :class:`ConformanceError` (a subclass of
 and the measured deviation, and returns a short dict of what it measured.
 The checks take plain callables and NumPy arrays, so they cannot depend on
 the internals of the package under test.
+
+Packages whose images come from an OPD (Fourier optics) use the
+``image_from_opd`` checks. Packages that render analytic point-source images
+(Gaussian, Moffat, Airy profiles) use the ``render`` variants:
+:func:`check_point_source_centring`, :func:`check_point_source_flux` and
+:func:`check_edge_flux_loss`.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -30,7 +36,10 @@ from .conventions import centroid, coordinate_grid, rms
 __all__ = [
     "ConformanceError",
     "check_coordinates",
+    "check_edge_flux_loss",
     "check_image_centring",
+    "check_point_source_centring",
+    "check_point_source_flux",
     "check_rms",
     "check_slope_sign",
     "check_tilt_direction",
@@ -57,6 +66,10 @@ def _as_host(value: Any) -> np.ndarray:
     except ImportError:  # pragma: no cover - CuPy optional
         pass
     return np.asarray(value)
+
+
+def _shape2(shape: Any) -> tuple[int, int]:
+    return int(shape[0]), int(shape[1])
 
 
 def _circular_pupil(shape: tuple[int, int]) -> np.ndarray:
@@ -98,15 +111,46 @@ def check_image_centring(
     centro-symmetric about the optical axis, so its centroid measures where the
     axis lies.
     """
-    image = _as_host(image_from_opd(np.zeros(pupil_shape)))
+    return _check_centred(_as_host(image_from_opd(np.zeros(pupil_shape))), tol_pixels)
+
+
+def _check_centred(image: np.ndarray, tol_pixels: float) -> dict[str, float]:
     cy, cx = centroid(image)
     if max(abs(cy), abs(cx)) > tol_pixels:
         _fail(
             "1.3",
-            f"the flat-wavefront image is centred at ({cy:+.3f}, {cx:+.3f}) pixels from "
-            "(n-1)/2; the fftshift convention (axis on pixel n/2) gives (+0.5, +0.5)",
+            f"the on-axis image of shape {image.shape} is centred at ({cy:+.3f}, {cx:+.3f}) "
+            "pixels from (n-1)/2; the fftshift convention (axis on pixel n/2) gives "
+            "(+0.5, +0.5)",
         )
     return {"centroid_y": cy, "centroid_x": cx}
+
+
+def check_point_source_centring(
+    render: Callable[[tuple[int, int]], Any],
+    *,
+    shapes: Sequence[tuple[int, int]] = ((32, 32), (33, 33)),
+    tol_pixels: float = 0.02,
+) -> dict[str, float]:
+    """Rule 1.3 for analytic images: an on-axis point source lands on ``(n - 1) / 2``.
+
+    The image-builder form of :func:`check_image_centring`, for packages whose
+    images are rendered from a PSF model rather than propagated from an OPD.
+    ``render(shape)`` returns the noise-free image, of ``shape`` pixels, of a
+    point source on the optical axis (zero field offset). The PSF must be
+    centro-symmetric (Gaussian, Moffat, Airy, ...), so its centroid measures
+    where the axis lies.
+
+    Checked for every window in ``shapes``. Keep an even size among them: for
+    odd ``n`` the ``fftshift`` convention (axis on pixel ``n // 2``) coincides
+    with ``(n - 1) / 2`` and cannot be told apart. Returns the worst centroid.
+    """
+    worst = {"centroid_y": 0.0, "centroid_x": 0.0}
+    for shape in shapes:
+        found = _check_centred(_as_host(render(_shape2(shape))), tol_pixels)
+        if max(map(abs, found.values())) >= max(map(abs, worst.values())):
+            worst = found
+    return worst
 
 
 # ------------------------------------------------------------------ section 3
@@ -169,10 +213,98 @@ def check_unit_flux(
     The callable must return an image on a window that holds essentially all
     of the light (for an FFT model, the whole padded grid).
     """
-    total = float(_as_host(psf_from_opd(np.zeros(pupil_shape))).sum())
-    if abs(total - 1.0) > rel_tol:
-        _fail("3.3", f"the normalized image sums to {total:.6f}, not 1")
+    return _check_total(_as_host(psf_from_opd(np.zeros(pupil_shape))), 1.0, rel_tol)
+
+
+def _check_total(image: np.ndarray, flux: float, rel_tol: float) -> dict[str, float]:
+    total = float(image.astype(np.float64).sum())
+    if abs(total - flux) > rel_tol * abs(flux):
+        _fail("3.3", f"the normalized image sums to {total:.6f}, not {flux:g}")
     return {"total": total}
+
+
+def check_point_source_flux(
+    render: Callable[[tuple[int, int]], Any],
+    *,
+    shape: tuple[int, int] = (128, 128),
+    flux: float = 1.0,
+    rel_tol: float = 1e-3,
+) -> dict[str, float]:
+    """Rule 3.3 for analytic images: a point source of unit flux sums to ``flux``.
+
+    The image-builder form of :func:`check_unit_flux`. ``render(shape)``
+    returns the noise-free image of an on-axis point source whose total flux
+    is ``flux`` (1 for a normalized PSF). ``shape`` must be large enough to
+    hold essentially all the light (to ``rel_tol``); for heavy-winged
+    profiles such as a Moffat with small beta, pick a larger window.
+    """
+    return _check_total(_as_host(render(_shape2(shape))), flux, rel_tol)
+
+
+def check_edge_flux_loss(
+    render: Callable[[tuple[int, int], tuple[float, float]], Any],
+    *,
+    shape: tuple[int, int] = (32, 32),
+    pad: int = 32,
+    rel_tol: float = 1e-3,
+    half_tol: float = 0.05,
+    symmetric: bool = True,
+) -> dict[str, float]:
+    """Rule 3.3: a window clips a source at its edge and does not renormalize.
+
+    ``render(shape, position)`` returns the noise-free image, of ``shape``
+    pixels, of one point source at ``position = (y, x)`` in pixels from the
+    window centre (the coordinates of rule 1.2, as :func:`aocore.centroid`
+    reports them: pixel ``i`` is at ``i - (n - 1) / 2``). The source's total
+    flux must not depend on the window.
+
+    For a source centred on each of the four window edges (``x = +-nx/2``,
+    ``y = +-ny/2``), the check requires
+
+    * that the window holds exactly the visible part of the source: the same
+      source rendered in a window larger by ``pad`` pixels on every side,
+      cropped back to ``shape``, has the same total flux (to ``rel_tol``);
+    * with ``symmetric`` (a centro-symmetric PSF narrow compared with the
+      window), that the edge source deposits about half (to ``half_tol``) the
+      flux of a source in the middle of the window.
+
+    A model that renormalizes the clipped stamp to its full flux deposits as
+    much at the edge as in the middle, and fails both.
+    """
+    if pad < 1:
+        raise ValueError("pad must be >= 1")
+    ny, nx = _shape2(shape)
+    big = (ny + 2 * pad, nx + 2 * pad)
+    middle = float(_as_host(render((ny, nx), (0.0, 0.0))).astype(np.float64).sum())
+    if not middle > 0:
+        _fail("3.3", "a source in the middle of the window deposits no flux")
+    out: dict[str, float] = {"middle": middle}
+    worst_ratio = 0.5
+    edges = {"+x": (0.0, nx / 2.0), "-x": (0.0, -nx / 2.0), "+y": (ny / 2.0, 0.0)}
+    edges["-y"] = (-ny / 2.0, 0.0)
+    for name, position in edges.items():
+        edge = float(_as_host(render((ny, nx), position)).astype(np.float64).sum())
+        large = _as_host(render(big, position)).astype(np.float64)
+        visible = float(large[pad : pad + ny, pad : pad + nx].sum())
+        if abs(edge - visible) > rel_tol * max(abs(visible), 1e-300):
+            _fail(
+                "3.3",
+                f"a source on the {name} edge deposits {edge:.6g} in the window, but only "
+                f"{visible:.6g} of it falls there (rendered in a larger window); the clipped "
+                "light must be lost, not renormalized away",
+            )
+        ratio = edge / middle
+        if symmetric and abs(ratio - 0.5) > half_tol:
+            _fail(
+                "3.3",
+                f"a source on the {name} edge deposits {ratio:.3f} of the flux of a source "
+                "in the middle; a symmetric PSF clipped at its centre keeps about half",
+            )
+        out[f"edge_{name}"] = edge
+        if abs(ratio - 0.5) >= abs(worst_ratio - 0.5):
+            worst_ratio = ratio
+    out["worst_ratio"] = worst_ratio
+    return out
 
 
 # ------------------------------------------------------------------ section 4

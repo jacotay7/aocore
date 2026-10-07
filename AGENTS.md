@@ -28,10 +28,11 @@ src/aocore/conformance.py check_* functions run by every package
 src/aocore/backend.py     Backend (NumPy | CuPy, single | double)
 src/aocore/propagation.py FFT/MFT/focal-plane/angular-spectrum propagators (exact adjoints)
 src/aocore/pupil.py       Pupil: circular, segmented, presets
-src/aocore/metrics.py     rms, remove_modes, wavefront_error, strehl
+src/aocore/metrics.py     rms (+ rms_unweighted, rms_tiptilt_removed), remove_modes, wavefront_error, strehl
 src/aocore/unwrap.py      weighted least-squares phase unwrapping
-src/aocore/sampling.py    block_sum
+src/aocore/sampling.py    block_sum, block_mean
 tests/                    pytest, including conformance self-checks
+benchmarks/               timing scripts (python benchmarks/bench_block_sum.py [--gpu])
 ```
 
 ## Quality gate
@@ -71,3 +72,10 @@ Never loosen a check to make a package pass. Fix the package instead.
   than 4.
 - `offset=-0.5` reproduces HCIPy's `fftshift` image centring (CONVENTIONS
   1.3).
+- Binning speed: on NumPy, one `sum(axis=(-3, -1))` over a reshaped array is
+  3-15x slower than strided adds per axis; on CuPy, a sum over the
+  non-contiguous axis -2 is 10-50x slower than the two-axis sum, and a
+  one-thread-per-block kernel beats both. `block_sum` takes the fast path
+  for each; re-run `benchmarks/bench_block_sum.py --gpu` before changing it.
+- `conformance.check_point_source_centring` needs an even window: for odd
+  `n` the `fftshift` axis `n // 2` equals `(n - 1) / 2`.

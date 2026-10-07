@@ -9,6 +9,7 @@ import pytest
 
 import aocore as ac
 from aocore.backend import _blas_threads, _cpu_workers
+from conftest import devices
 
 
 def test_conventions_helpers() -> None:
@@ -87,3 +88,23 @@ def test_propagator_validation() -> None:
     asp = ac.AngularSpectrumPropagator(8, 1e-5, 1e-6, 1e-3, paraxial=True)
     u = np.ones((8, 8), complex)
     np.testing.assert_allclose(np.abs(asp.forward(u)), 1.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("device", devices())
+def test_coordinate_helpers_dtype_and_backend(device) -> None:
+    host = ac.centered_coordinates(6, 0.25, 0.5)
+    assert isinstance(host, np.ndarray) and host.dtype == np.float64  # default unchanged
+    be = ac.get_backend(device)
+    coords = ac.centered_coordinates(6, 0.25, 0.5, backend=device)
+    assert coords.dtype == be.real_dtype and isinstance(coords, type(be.zeros(1)))
+    np.testing.assert_array_equal(ac.to_numpy(coords), host.astype(be.real_dtype))
+    single = ac.centered_coordinates(5, 0.1, dtype=np.float32, backend=be)
+    np.testing.assert_array_equal(
+        ac.to_numpy(single), ac.centered_coordinates(5, 0.1).astype(np.float32)
+    )
+    y, x = ac.coordinate_grid((3, 4), 2.0, dtype=np.float32, backend=device)
+    assert y.shape == x.shape == (3, 4) and x.dtype == np.float32
+    assert ac.to_numpy(x)[0].tolist() == [-3.0, -1.0, 1.0, 3.0]
+    assert ac.to_numpy(y)[:, 0].tolist() == [-2.0, 0.0, 2.0]
+    gy, gx = ac.coordinate_grid(4)
+    assert gy.dtype == np.float64 and not gx.flags.writeable

@@ -110,3 +110,150 @@ def test_aocore_primitives_pass_their_own_conformance_checks() -> None:
         ),
         pupil_shape=pupil.shape,
     )
+
+
+def _grey_pupil_and_opd() -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(1)
+    amplitude = Pupil.circular(48, 1.0, obscuration=0.2).amplitude.copy()
+    amplitude[amplitude > 0] *= rng.uniform(0.3, 1.0, int(np.count_nonzero(amplitude)))
+    y, x = ac.coordinate_grid(amplitude.shape, 1.0 / 48)
+    opd = 5e-7 + 2e-7 * x - 3e-7 * y + 1e-8 * rng.standard_normal(amplitude.shape)
+    return opd, amplitude
+
+
+@pytest.mark.parametrize("device", devices())
+def test_rms_unweighted_keeps_piston_and_ignores_weights(device) -> None:
+    be = ac.get_backend(device, "double")
+    opd, amplitude = _grey_pupil_and_opd()
+    mask = amplitude > 0
+    expected = float(np.sqrt(np.mean(opd[mask] ** 2)))
+    assert ac.rms_unweighted(be.asarray(opd), be.asarray(mask)) == pytest.approx(expected)
+    # Non-zero amplitude counts as inside, whatever its value; a Pupil uses its mask.
+    assert ac.rms_unweighted(be.asarray(opd), amplitude) == pytest.approx(expected)
+    pupil = Pupil.from_array(amplitude)
+    assert ac.rms_unweighted(be.asarray(opd), pupil) == pytest.approx(expected)
+    # Piston is not removed: a constant c gives |c|.
+    assert ac.rms_unweighted(be.asarray(np.full((4, 4), -3e-7))) == pytest.approx(3e-7)
+    # NaN outside the mask is ignored; float32 input is accumulated in float64.
+    holes = np.where(mask, opd, np.nan).astype(np.float32)
+    got = ac.rms_unweighted(be.asarray(holes, np.float32), mask)
+    assert got == pytest.approx(expected, rel=1e-6)
+
+
+def test_rms_unweighted_errors() -> None:
+    with pytest.raises(ValueError, match="shape"):
+        ac.rms_unweighted(np.zeros((3, 3)), np.ones((4, 4)))
+    with pytest.raises(ValueError, match="mask is empty"):
+        ac.rms_unweighted(np.zeros((3, 3)), np.zeros((3, 3)))
+    with pytest.raises(ValueError, match="empty"):
+        ac.rms_unweighted(np.zeros(0))
+
+
+@pytest.mark.parametrize("device", devices())
+def test_rms_tiptilt_removed_matches_remove_modes(device) -> None:
+    be = ac.get_backend(device, "double")
+    opd, amplitude = _grey_pupil_and_opd()
+    pupil = Pupil.from_array(amplitude, pitch=1.0 / 48)
+    expected = ac.rms(opd, pupil, "tiptilt")
+    assert 5e-9 < expected < 2e-8  # the noise, not the piston and tilts
+    got = ac.rms_tiptilt_removed(be.asarray(opd), be.asarray(amplitude))
+    assert got == pytest.approx(expected, rel=1e-10)
+    assert ac.rms_tiptilt_removed(be.asarray(opd), pupil) == pytest.approx(expected, rel=1e-10)
+    holes = np.where(amplitude > 0, opd, np.nan)
+    assert ac.rms_tiptilt_removed(be.asarray(holes), pupil) == pytest.approx(expected, rel=1e-10)
+    y, x = ac.coordinate_grid(pupil.shape)
+    plane = be.asarray(1e-6 + 3e-7 * x + 2e-7 * y)
+    assert ac.rms_tiptilt_removed(plane, pupil) < 1e-20
+
+
+def test_rms_tiptilt_removed_edge_cases() -> None:
+    # One illuminated row: tilt is undetermined, and the fit stays finite.
+    amplitude = np.zeros((5, 6))
+    amplitude[2] = 1.0
+    opd = np.tile(np.arange(6.0), (5, 1)) + 7.0
+    assert ac.rms_tiptilt_removed(opd, amplitude) < 1e-12
+    with pytest.raises(ValueError, match="2-D"):
+        ac.rms_tiptilt_removed(np.zeros((3, 3)), np.ones((4, 4)))
+    with pytest.raises(ValueError, match="transmission"):
+        ac.rms_tiptilt_removed(np.zeros((3, 3)), np.zeros((3, 3)))
+
+
+def _block_sum_reference(array: np.ndarray, fy: int, fx: int) -> np.ndarray:
+    *lead, ny, nx = array.shape
+    return array.reshape(*lead, ny // fy, fy, nx // fx, fx).sum(axis=(-3, -1))
+
+
+@pytest.mark.parametrize("factor", [2, 3, 4, 5, 8, (2, 3), (1, 6), (5, 1), (4, 8)])
+@pytest.mark.parametrize("dtype", [np.float32, np.float64, np.complex128, np.uint8, np.int16, bool])
+def test_block_sum_matches_the_two_axis_reduction(factor, dtype) -> None:
+    rng = np.random.default_rng(3)
+    fy, fx = (factor, factor) if isinstance(factor, int) else factor
+    shape = (3, 4 * fy * 3, 4 * fx * 5)
+    if np.dtype(dtype).kind == "c":
+        image = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(dtype)
+    else:
+        image = (rng.uniform(0, 255, shape)).astype(dtype)
+    expected = _block_sum_reference(image, fy, fx)
+    for data in (image, np.asfortranarray(image)):
+        got = ac.block_sum(data, factor)
+        assert got.dtype == expected.dtype and got.shape == expected.shape
+        if np.dtype(dtype).kind in "biu":
+            np.testing.assert_array_equal(got, expected)  # exact, no overflow
+        else:
+            rtol = 1e-5 if dtype == np.float32 else 1e-13
+            np.testing.assert_allclose(got, expected, rtol=rtol)
+
+
+@pytest.mark.parametrize("device", devices())
+@pytest.mark.parametrize(
+    ("shape", "factor"),
+    [((24, 24), 2), ((24, 24), 4), ((24, 24), 8), ((384, 384), 3), ((512, 512), (4, 2))],
+)
+def test_block_sum_on_each_backend(device, shape, factor) -> None:
+    be = ac.get_backend(device, "single")
+    rng = np.random.default_rng(4)
+    image = rng.uniform(size=shape).astype(np.float32)
+    fy, fx = (factor, factor) if isinstance(factor, int) else factor
+    got = ac.block_sum(be.asarray(image), factor)
+    assert isinstance(got, type(be.asarray(image)))
+    np.testing.assert_allclose(ac.to_numpy(got), _block_sum_reference(image, fy, fx), rtol=1e-5)
+    counts = be.asarray(rng.integers(0, 255, shape).astype(np.uint8))
+    host = ac.to_numpy(counts)
+    np.testing.assert_array_equal(
+        ac.to_numpy(ac.block_sum(counts, factor)), _block_sum_reference(host, fy, fx)
+    )
+    mean = ac.block_mean(be.asarray(image), factor)
+    np.testing.assert_allclose(
+        ac.to_numpy(mean), _block_sum_reference(image, fy, fx) / (fy * fx), rtol=1e-5
+    )
+
+
+@pytest.mark.parametrize("device", devices())
+@pytest.mark.parametrize("dtype", [np.float64, np.complex64, np.int16, np.uint32, bool])
+def test_block_sum_dtypes_and_layouts_on_each_backend(device, dtype) -> None:
+    be = ac.get_backend(device)
+    rng = np.random.default_rng(5)
+    image = rng.uniform(-100, 100, (2, 3, 12, 30))
+    if np.dtype(dtype).kind == "c":
+        image = image + 1j * rng.uniform(-100, 100, image.shape)
+    elif np.dtype(dtype).kind in "bu":
+        image = np.abs(image)
+    image = image.astype(dtype)
+    for data, factor in ((image, (3, 5)), (np.swapaxes(image, -1, -2)[..., :, :12], 6)):
+        host = np.asarray(data)
+        expected = _block_sum_reference(host, *_factor_pair(factor))
+        got = ac.block_sum(be.xp.asarray(host) if device == "gpu" else data, factor)
+        assert got.dtype == expected.dtype and got.shape == expected.shape
+        np.testing.assert_allclose(ac.to_numpy(got), expected, rtol=1e-6, atol=1e-3)
+
+
+def _factor_pair(factor: int | tuple[int, int]) -> tuple[int, int]:
+    return (factor, factor) if isinstance(factor, int) else factor
+
+
+def test_block_mean() -> None:
+    counts = np.arange(16, dtype=np.int32).reshape(4, 4)
+    np.testing.assert_array_equal(ac.block_mean(counts, 2), [[2.5, 4.5], [10.5, 12.5]])
+    assert ac.block_mean(counts, 1).dtype == np.float64
+    with pytest.raises(ValueError, match=">= 1"):
+        ac.block_mean(counts, (1, 0))
