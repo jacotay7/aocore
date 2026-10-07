@@ -1,0 +1,36 @@
+site_name: aocore
+site_description: Shared conventions, conformance checks and optics primitives for the AO stack
+site_url: https://jacotay7.github.io/aocore/
+repo_url: https://github.com/jacotay7/aocore
+repo_name: jacotay7/aocore
+theme:
+  name: material
+  features: [navigation.sections, content.code.copy]
+nav:
+  - Home: index.md
+  - Conventions: conventions.md
+  - Conformance checks: conformance.md
+  - API reference: api.md
+  - Changelog: changelog.md
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: numpy
+            show_root_heading: true
+            show_source: false
+            members_order: source
+            merge_init_into_class: true
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
