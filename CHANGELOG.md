@@ -2,6 +2,14 @@
 
 All notable changes to `aocore` are documented here.
 
+## [Unreleased]
+
+- **Fixed: CONVENTIONS 8.4 said every package is MIT-licensed.** pyRTC is
+  GPL-3.0-or-later. The rule now says so, and states the direction that keeps
+  the MIT packages clean: pyRTC may import them, but they never depend on
+  pyRTC or copy code from it. No rule for code changes, so the contract stays
+  at v1.1.
+
 ## [0.1.2] - 2026-10-07
 
 - **Changed: CONVENTIONS 7.1 (contract v1.1) recognizes both slope layouts in

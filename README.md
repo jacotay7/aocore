@@ -48,4 +48,5 @@ aocore depends only on NumPy, SciPy and threadpoolctl. CuPy is optional.
 
 ## License
 
-MIT. Everything in the stack must be shippable under MIT (see CONVENTIONS 8.4).
+MIT. Every package in the stack except pyRTC (GPL-3.0-or-later) is MIT, and none
+of them may copy GPL code (see CONVENTIONS 8.4).
