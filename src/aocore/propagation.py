@@ -143,26 +143,33 @@ class FFTPropagator(Propagator):
         self._out_mod_conj = xp.conj(self._out_mod)
 
     def forward(self, field: Any) -> Any:
-        xp = self.backend.xp
-        ny, nx = self.in_shape
-        big_y, big_x = self.n_fft
-        lead = field.shape[:-2]
-        padded = xp.zeros((*lead, big_y, big_x), dtype=self.backend.complex_dtype)
-        padded[..., :ny, :nx] = field * self._in_mod
-        spectrum = self.backend.fft2(padded)
-        my, mx = self.out_shape
-        return spectrum[..., :my, :mx] * self._out_mod
+        return self._forward(field)
 
     def adjoint(self, field: Any) -> Any:
-        xp = self.backend.xp
-        ny, nx = self.in_shape
-        big_y, big_x = self.n_fft
-        lead = field.shape[:-2]
-        spectrum = xp.zeros((*lead, big_y, big_x), dtype=self.backend.complex_dtype)
-        my, mx = self.out_shape
-        spectrum[..., :my, :mx] = field * self._out_mod_conj
-        padded = self.backend.ifft2(spectrum)
-        return padded[..., :ny, :nx] * self._in_mod_conj
+        return self._adjoint(field)
+
+    def _forward(self, field: Any, out: Any = None) -> Any:
+        # Backend.padded_fft2 skips the zero rows of the padded pupil and the
+        # cropped-away columns of the spectrum: about half the FFT work.
+        return self.backend.padded_fft2(
+            field,
+            self.n_fft,
+            self.out_shape,
+            weights=self._in_mod,
+            out_weights=self._out_mod,
+            out=out,
+        )
+
+    def _adjoint(self, field: Any, out: Any = None) -> Any:
+        return self.backend.padded_fft2(
+            field,
+            self.n_fft,
+            self.in_shape,
+            inverse=True,
+            weights=self._out_mod_conj,
+            out_weights=self._in_mod_conj,
+            out=out,
+        )
 
 
 # --------------------------------------------------------------------- MFT
@@ -228,6 +235,7 @@ class MFTPropagator(Propagator):
         self._axt = xp.asarray(np.swapaxes(ax, -1, -2), dtype=cdt)
         self._ayh = xp.asarray(np.conj(np.swapaxes(ay, -1, -2)), dtype=cdt)
         self._axc = xp.asarray(np.conj(ax), dtype=cdt)
+        self._expanded: dict[tuple[tuple[int, ...], bool], tuple[Any, Any]] = {}
 
     def _matrix(self, axis: int, big: float) -> np.ndarray:
         n, m = self.in_shape[axis], self.out_shape[axis]
@@ -240,18 +248,55 @@ class MFTPropagator(Propagator):
         ny, nx = self.in_shape
         return float(field.size // (ny * nx)) * (my * ny * nx + my * nx * mx)
 
+    def _matrices(self, field: Any, adjoint: bool) -> tuple[Any, Any]:
+        """The left and right matrices, expanded to the field's batch on a GPU.
+
+        CuPy's ``matmul`` is ~130 us slower per call when it has to broadcast
+        the matrices over leading field axes (e.g. diversity channels) than
+        for operands of equal batch shape. Expanding the matrices once runs
+        the same batched cuBLAS products (bit-identical results), at the cost
+        of keeping a copy per field batch shape; copies over 32 MiB are not
+        made and a handful of shapes are kept.
+        """
+        left, right = (self._ayh, self._axc) if adjoint else (self._ay, self._axt)
+        batch = tuple(field.shape[:-2])
+        if not self.backend.is_gpu or batch == left.shape[:-2]:
+            return left, right
+        key = (batch, adjoint)
+        cached = self._expanded.get(key)
+        if cached is not None:
+            return cached
+        try:
+            full = np.broadcast_shapes(batch, left.shape[:-2])
+        except ValueError:
+            return left, right  # let matmul raise its usual error
+        per_batch = math.prod(left.shape[-2:]) + math.prod(right.shape[-2:])
+        nbytes = math.prod(full) * per_batch * left.dtype.itemsize
+        if full != batch or nbytes > 32 * 2**20:
+            return left, right
+        xp = self.backend.xp
+        cached = tuple(
+            xp.ascontiguousarray(xp.broadcast_to(m, (*full, *m.shape[-2:]))) for m in (left, right)
+        )
+        if len(self._expanded) >= 4:
+            self._expanded.clear()
+        self._expanded[key] = cached
+        return cached
+
     def forward(self, field: Any) -> Any:
         xp = self.backend.xp
+        left, right = self._matrices(field, adjoint=False)
         with self.backend.blas_limit(self._work(field)):
-            return xp.matmul(xp.matmul(self._ay, field), self._axt)
+            return xp.matmul(xp.matmul(left, field), right)
 
     def adjoint(self, field: Any) -> Any:
         xp = self.backend.xp
         my, mx = self.out_shape
         ny, nx = self.in_shape
         work = float(field.size // (my * mx)) * (ny * my * mx + ny * mx * nx)
+        left, right = self._matrices(field, adjoint=True)
         with self.backend.blas_limit(work):
-            return xp.matmul(xp.matmul(self._ayh, field), self._axc)
+            return xp.matmul(xp.matmul(left, field), right)
 
 
 # ----------------------------------------------------------- focal plane
@@ -324,7 +369,7 @@ class FocalPlanePropagator(Propagator):
             method = "fft" if fft_ok and self._fft_cheaper() else "mft"
         self.method = method
         if method == "fft":
-            self._engines: list[Propagator] = [
+            self._engines: list[FFTPropagator] = [
                 FFTPropagator(
                     self.in_shape,
                     self.out_shape,
@@ -375,18 +420,23 @@ class FocalPlanePropagator(Propagator):
     def forward(self, field: Any) -> Any:
         if self._mft is not None:
             return self._mft.forward(field)
-        xp = self.backend.xp
-        return xp.stack(
-            [eng.forward(field[..., i, :, :]) for i, eng in enumerate(self._engines)], axis=-3
-        )
+        return self._per_wavelength(field, self.out_shape, adjoint=False)
 
     def adjoint(self, field: Any) -> Any:
         if self._mft is not None:
             return self._mft.adjoint(field)
-        xp = self.backend.xp
-        return xp.stack(
-            [eng.adjoint(field[..., i, :, :]) for i, eng in enumerate(self._engines)], axis=-3
+        return self._per_wavelength(field, self.in_shape, adjoint=True)
+
+    def _per_wavelength(self, field: Any, shape: tuple[int, int], *, adjoint: bool) -> Any:
+        # Each FFT engine writes its final product straight into its wavelength
+        # slice, instead of stacking (and copying) per-wavelength results.
+        out = self.backend.xp.empty(
+            (*field.shape[:-3], len(self._engines), *shape), dtype=self.backend.complex_dtype
         )
+        for i, engine in enumerate(self._engines):
+            apply = engine._adjoint if adjoint else engine._forward
+            apply(field[..., i, :, :], out=out[..., i, :, :])
+        return out
 
 
 # ---------------------------------------------------------- near field

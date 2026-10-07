@@ -32,8 +32,8 @@ src/aocore/metrics.py     rms (+ rms_unweighted, rms_tiptilt_removed), remove_mo
 src/aocore/unwrap.py      weighted least-squares phase unwrapping
 src/aocore/sampling.py    block_sum, block_mean
 tests/                    pytest, including conformance self-checks
-benchmarks/               timing scripts (python benchmarks/bench_block_sum.py [--gpu]);
-                          results/ holds recorded runs on other hardware
+benchmarks/               timing scripts (python benchmarks/bench_block_sum.py [--gpu],
+                          bench_propagation.py [--gpu]); results/ holds recorded runs
 ```
 
 ## Quality gate
@@ -70,7 +70,25 @@ Never loosen a check to make a package pass. Fix the package instead.
 - `Backend.dot` avoids threaded OpenBLAS level-1 calls, which stall about
   1 ms per call when the cores are busy. `Backend.blas_limit` caps BLAS
   threads for mid-sized matrix products, where 16 threads run 2-4x slower
-  than 4.
+  than 4 on a hyper-threaded x86. Without SMT (Arm servers) 8 threads are 2x
+  faster than 4, so `_blas_threads` checks `/sys/devices/system/cpu/smt/active`.
+  BLAS thread counts never change results; FFT thread counts can (below).
+- `Backend.padded_fft2` must reproduce `fft2` value for value. SciPy's
+  out-of-place `fft2` runs the last axis first with ducc (SciPy >= 1.18) but
+  the first axis first with pocketfft (<= 1.17), so the pass order is probed
+  once (`_fft2_first_axis`). The `ortho` factor is applied in the first pass.
+  Lines are transformed in bunches of 16 and a remainder group can round
+  differently, hence the 16-line padding; and SciPy's results already change
+  in the last bit with the thread count (12+ threads partition lines
+  differently), so never compare thread counts bit for bit. Check changes
+  with a saved before/after matrix of outputs, not only the tests.
+- Writing a fresh multi-megabyte NumPy array costs a page fault per 4 KiB
+  (glibc hands freed large blocks back to the kernel), which took as long as
+  the FFT itself on the Arm bench. Hot CPU paths reuse per-thread work arrays
+  from `backend._workspace`; never return one of them to a caller.
+- CuPy's `matmul` costs ~130 us more per call when it must broadcast an
+  operand's batch axes. `MFTPropagator` expands its matrices to the field's
+  batch shape (cached per shape) on the GPU; the results are bit-identical.
 - `offset=-0.5` reproduces HCIPy's `fftshift` image centring (CONVENTIONS
   1.3).
 - Binning speed: on NumPy, one `sum(axis=(-3, -1))` over a reshaped array is
