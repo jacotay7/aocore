@@ -4,11 +4,61 @@ All notable changes to `aocore` are documented here.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-10-07
+
+Faster propagators on CPU and GPU; results are unchanged up to last-bit
+rounding.
+Additive release; the contract stays at v1.1. Measured on an 80-core Arm
+Neoverse-N1 pinned to 12 cores and an RTX 4060; see
+`benchmarks/results/propagation-neoverse-n1.md` and
+`benchmarks/bench_propagation.py`.
+
+- **Faster `FFTPropagator` (and the FFT engine of `FocalPlanePropagator`) on
+  the CPU: 2.4-3.0x for 64-256 pixel pupils, 1.6x for 512.** The padded
+  transform skips the all-zero rows of the padded pupil and the columns the
+  output window crops away (about half the FFT work), and reuses its work
+  arrays between calls instead of faulting in fresh pages. In solvephase
+  0.2.0 this makes `focal_lm` 1.2-1.4x, phase diversity up to 1.6x and LIFT
+  up to 1.4x faster on the CPU. The values come from the same 1-D passes in
+  the same order as before, so they are bit-identical for power-of-two grids
+  up to 256 points; elsewhere they differ by at most 2.5 units in the last
+  place of the largest value, as much as 0.1.3's own results change with
+  the FFT thread count.
+- **New: `Backend.padded_fft2(array, shape, out_shape, *, inverse, weights,
+  out_weights, out)`**, the unitary FFT of a block zero-padded to `shape`,
+  cropped to `out_shape`, which the propagators now use. It follows the pass
+  order of the installed SciPy's `fft2` (pocketfft and ducc differ). On the
+  GPU it is the full transform and crop, as before.
+- **Faster `MFTPropagator` on the GPU: 3.5-4.3x for 128-pixel pupils, 1.4x
+  for 256**, bit-identical. CuPy's `matmul` is slow when it broadcasts the
+  matrices over leading field axes (diversity channels); the propagator now
+  expands them to the field's batch shape once and keeps them (up to 32 MiB
+  per shape, four shapes). Broadband focal-plane gradients in solvephase are
+  1.3-1.4x faster on the GPU.
+- **More BLAS threads on CPUs without simultaneous multithreading.** When
+  Linux reports SMT inactive (Arm servers), matrix products above ~4M
+  multiply-adds use 8 threads instead of 4, capped by the CPUs the process
+  may run on: the CPU MFT is 1.8x faster for 128-pixel pupils. Hyper-threaded
+  machines keep the 0.1.3 counts. The thread count does not change the
+  results.
+- **`FocalPlanePropagator` writes each wavelength's FFT result straight into
+  one output array** instead of stacking copies (1.2x on the GPU at these
+  sizes).
+- **`Backend.dot` on the GPU reduces the elementwise product directly**,
+  which rounds exactly as `cupy.vdot` (checked for all four dtypes) with
+  ~20 us less overhead per call.
+- `os.cpu_count()` is read once (it cost ~25 us per FFT on a busy Arm host).
 - **Added: `benchmarks/results/block_sum-neoverse-n1.md`**, `block_sum` timings
   on an Arm Neoverse-N1 host with an RTX 4060 and an RTX A400.
 - **Fixed: the backend threading test failed when `AOCORE_FFT_WORKERS` or
   `AOCORE_BLAS_THREADS` was set in the environment**, as on a benchmark host
   that pins thread counts. It now clears those overrides itself.
+- Not adopted: pinned host staging buffers for `Backend.asarray` (10 us
+  faster below 64 KiB, slower above 512 KiB on this host), threaded DCTs in
+  `unwrap_phase` (2.5-3x faster preconditioner, but the thread partition
+  changes the rounding and therefore the CG iterates), and pruned FFTs on
+  the GPU (a CuPy 2-D FFT at these sizes costs mostly call overhead, which
+  two 1-D passes would double).
 
 ## [0.1.3] - 2026-10-07
 
