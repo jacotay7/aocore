@@ -4,17 +4,16 @@ All notable changes to `aocore` are documented here.
 
 ## [Unreleased]
 
-- **Fixed: CONVENTIONS 8.4 said every package is MIT-licensed.** pyRTC is
-  GPL-3.0-or-later. The rule now says so, and states the direction that keeps
-  the MIT packages clean: pyRTC may import them, but they never depend on
-  pyRTC or copy code from it. No rule for code changes, so the contract stays
-  at v1.1.
-
 ## [0.1.3] - 2026-10-07
 
 Additive release; the contract stays at v1.1. Gaps found while moving the
 sibling packages onto aocore.
 
+- **Fixed: CONVENTIONS 8.4 said every package is MIT-licensed.** pyRTC is
+  GPL-3.0-or-later. The rule now says so, and states the direction that keeps
+  the MIT packages clean: pyRTC may import them, but they never depend on
+  pyRTC or copy code from it. No rule for code changes, so the contract stays
+  at v1.1.
 - **New: `rms_unweighted(opd, mask=None)` and `rms_tiptilt_removed(opd,
   pupil)`**, the RMS variants CONVENTIONS 4.1 names. `rms_unweighted` is the
   plain quadratic mean over the mask (or the whole array) with piston
