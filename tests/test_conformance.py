@@ -136,13 +136,20 @@ def test_wind_motion() -> None:
 
 
 def test_slope_sign() -> None:
-    def slopes(opd: np.ndarray, swap: bool = False) -> np.ndarray:
+    def slopes(opd: np.ndarray, swap: bool = False, interleave: bool = False) -> np.ndarray:
         gy, gx = np.gradient(opd)
         sub = gx.reshape(4, 8, 4, 8).mean(axis=(1, 3)).ravel()
         suby = gy.reshape(4, 8, 4, 8).mean(axis=(1, 3)).ravel()
+        if interleave:
+            return np.stack([sub, suby], axis=1).ravel()
         return np.concatenate([suby, sub] if swap else [sub, suby])
 
     kw = {"pupil_shape": (N, N), "pitch": PITCH, "gradient": 1e-6, "n_subapertures": 16}
     cf.check_slope_sign(slopes, **kw)
+    cf.check_slope_sign(lambda o: slopes(o, interleave=True), layout="interleaved", **kw)
     with pytest.raises(cf.ConformanceError, match="7"):
         cf.check_slope_sign(lambda o: slopes(o, swap=True), **kw)
+    with pytest.raises(cf.ConformanceError, match="7"):
+        cf.check_slope_sign(lambda o: slopes(o, interleave=True), **kw)
+    with pytest.raises(ValueError, match="layout"):
+        cf.check_slope_sign(slopes, layout="zigzag", **kw)

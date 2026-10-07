@@ -2,6 +2,15 @@
 
 All notable changes to `aocore` are documented here.
 
+## [0.1.2] - 2026-10-07
+
+- **Changed: CONVENTIONS 7.1 (contract v1.1) recognizes both slope layouts in
+  use.** shmpipeline-ao interleaves `(sx, sy)` per subaperture (its ADR 0002)
+  and pyRTC concatenates all x-slopes, then all y-slopes. Slope vectors must
+  now declare their layout, and `check_slope_sign(..., layout="interleaved" |
+  "blocked")` checks against the declared one. A swapped layout or a flipped
+  sign still fails.
+
 ## [0.1.1] - 2026-10-06
 
 - **Fixed: `check_wind_motion` could report no motion for a correctly moving

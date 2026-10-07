@@ -7,7 +7,7 @@ Each rule has a reference implementation in `aocore` and an executable check in
 changes only through a pull request to aocore that also updates the checks.
 The packages that consume it then follow.
 
-Status: **adopted** (version 1).
+Status: **adopted** (version 1.1).
 
 ## 1. Arrays and coordinates
 
@@ -108,9 +108,14 @@ along (x, y).
 
 ## 7. Wavefront sensing and control
 
-7.1 **Slope ordering.** Slope vectors are ordered with all x-slopes first,
-then all y-slopes: `[sx_1 ... sx_N, sy_1 ... sy_N]`. Each slope uses the
-x/y of 1.1.
+7.1 **Slope layout.** Subapertures are ordered row-major over
+`(subap_y, subap_x)`. Two layouts of slope vectors are in use, and every slope
+vector, stream or calibration artifact declares which one it uses:
+
+- **interleaved**, `[sx_1, sy_1, sx_2, sy_2, ...]` (shmpipeline-ao ADR 0002);
+- **blocked**, `[sx_1 ... sx_N, sy_1 ... sy_N]` (pyRTC).
+
+Each component uses the x/y of 1.1. Conversions between layouts are explicit.
 
 7.2 **Slope sign.** A positive x-slope means the spot moved towards +x, which
 is a positive OPD gradient along x (3.1).

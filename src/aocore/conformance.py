@@ -292,24 +292,34 @@ def check_slope_sign(
     pitch: float,
     gradient: float,
     n_subapertures: int,
+    layout: str = "blocked",
 ) -> dict[str, float]:
-    """Rules 7.1 and 7.2: x-slopes first, positive for a positive OPD gradient along x.
+    """Rules 7.1 and 7.2: the declared slope layout, positive for a positive OPD gradient.
 
-    ``slopes_from_opd(opd)`` returns the slope vector ``[sx..., sy...]`` (length
-    ``2 * n_subapertures``) for an OPD map. A ramp ``gradient * x`` must give
-    positive mean x-slopes and near-zero y-slopes, and a ramp along y the
-    reverse.
+    ``slopes_from_opd(opd)`` returns the slope vector (length
+    ``2 * n_subapertures``) for an OPD map, in the declared ``layout``:
+    ``"blocked"`` (``[sx..., sy...]``) or ``"interleaved"``
+    (``[sx_1, sy_1, ...]``). A ramp ``gradient * x`` must give positive mean
+    x-slopes and near-zero y-slopes, and a ramp along y the reverse, so a
+    swapped layout or a flipped sign fails.
     """
+    if layout not in ("blocked", "interleaved"):
+        raise ValueError("layout must be 'blocked' or 'interleaved'")
     y, x = coordinate_grid(pupil_shape, pitch)
     sx_ramp = _as_host(slopes_from_opd(gradient * x)).astype(np.float64).ravel()
     sy_ramp = _as_host(slopes_from_opd(gradient * y)).astype(np.float64).ravel()
     if sx_ramp.size != 2 * n_subapertures:
         _fail("7.1", f"slope vector has {sx_ramp.size} entries, expected 2 x {n_subapertures}")
-    half = n_subapertures
-    mx, my = sx_ramp[:half].mean(), sx_ramp[half:].mean()
+
+    def split(vector: np.ndarray) -> tuple[float, float]:
+        if layout == "interleaved":
+            return float(vector[0::2].mean()), float(vector[1::2].mean())
+        return float(vector[:n_subapertures].mean()), float(vector[n_subapertures:].mean())
+
+    mx, my = split(sx_ramp)
     if not (mx > 0 and abs(my) < 0.1 * abs(mx)):
         _fail("7.2", f"an OPD ramp along +x gave mean slopes (x, y) = ({mx:.3g}, {my:.3g})")
-    nx_, ny_ = sy_ramp[:half].mean(), sy_ramp[half:].mean()
+    nx_, ny_ = split(sy_ramp)
     if not (ny_ > 0 and abs(nx_) < 0.1 * abs(ny_)):
         _fail("7.2", f"an OPD ramp along +y gave mean slopes (x, y) = ({nx_:.3g}, {ny_:.3g})")
     return {"x_ramp_mean_sx": mx, "y_ramp_mean_sy": ny_}
