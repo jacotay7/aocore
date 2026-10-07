@@ -143,26 +143,33 @@ class FFTPropagator(Propagator):
         self._out_mod_conj = xp.conj(self._out_mod)
 
     def forward(self, field: Any) -> Any:
-        xp = self.backend.xp
-        ny, nx = self.in_shape
-        big_y, big_x = self.n_fft
-        lead = field.shape[:-2]
-        padded = xp.zeros((*lead, big_y, big_x), dtype=self.backend.complex_dtype)
-        padded[..., :ny, :nx] = field * self._in_mod
-        spectrum = self.backend.fft2(padded)
-        my, mx = self.out_shape
-        return spectrum[..., :my, :mx] * self._out_mod
+        return self._forward(field)
 
     def adjoint(self, field: Any) -> Any:
-        xp = self.backend.xp
-        ny, nx = self.in_shape
-        big_y, big_x = self.n_fft
-        lead = field.shape[:-2]
-        spectrum = xp.zeros((*lead, big_y, big_x), dtype=self.backend.complex_dtype)
-        my, mx = self.out_shape
-        spectrum[..., :my, :mx] = field * self._out_mod_conj
-        padded = self.backend.ifft2(spectrum)
-        return padded[..., :ny, :nx] * self._in_mod_conj
+        return self._adjoint(field)
+
+    def _forward(self, field: Any, out: Any = None) -> Any:
+        # Backend.padded_fft2 skips the zero rows of the padded pupil and the
+        # cropped-away columns of the spectrum: about half the FFT work.
+        return self.backend.padded_fft2(
+            field,
+            self.n_fft,
+            self.out_shape,
+            weights=self._in_mod,
+            out_weights=self._out_mod,
+            out=out,
+        )
+
+    def _adjoint(self, field: Any, out: Any = None) -> Any:
+        return self.backend.padded_fft2(
+            field,
+            self.n_fft,
+            self.in_shape,
+            inverse=True,
+            weights=self._out_mod_conj,
+            out_weights=self._in_mod_conj,
+            out=out,
+        )
 
 
 # --------------------------------------------------------------------- MFT
@@ -324,7 +331,7 @@ class FocalPlanePropagator(Propagator):
             method = "fft" if fft_ok and self._fft_cheaper() else "mft"
         self.method = method
         if method == "fft":
-            self._engines: list[Propagator] = [
+            self._engines: list[FFTPropagator] = [
                 FFTPropagator(
                     self.in_shape,
                     self.out_shape,
@@ -375,18 +382,23 @@ class FocalPlanePropagator(Propagator):
     def forward(self, field: Any) -> Any:
         if self._mft is not None:
             return self._mft.forward(field)
-        xp = self.backend.xp
-        return xp.stack(
-            [eng.forward(field[..., i, :, :]) for i, eng in enumerate(self._engines)], axis=-3
-        )
+        return self._per_wavelength(field, self.out_shape, adjoint=False)
 
     def adjoint(self, field: Any) -> Any:
         if self._mft is not None:
             return self._mft.adjoint(field)
-        xp = self.backend.xp
-        return xp.stack(
-            [eng.adjoint(field[..., i, :, :]) for i, eng in enumerate(self._engines)], axis=-3
+        return self._per_wavelength(field, self.in_shape, adjoint=True)
+
+    def _per_wavelength(self, field: Any, shape: tuple[int, int], *, adjoint: bool) -> Any:
+        # Each FFT engine writes its final product straight into its wavelength
+        # slice, instead of stacking (and copying) per-wavelength results.
+        out = self.backend.xp.empty(
+            (*field.shape[:-3], len(self._engines), *shape), dtype=self.backend.complex_dtype
         )
+        for i, engine in enumerate(self._engines):
+            apply = engine._adjoint if adjoint else engine._forward
+            apply(field[..., i, :, :], out=out[..., i, :, :])
+        return out
 
 
 # ---------------------------------------------------------- near field

@@ -132,3 +132,19 @@ def test_precision_and_device_parity(device: str, precision: str, rng) -> None:
     np.testing.assert_allclose(
         to_numpy(out), ref.forward(u), atol=tol * np.abs(ref.forward(u)).max()
     )
+
+
+@pytest.mark.parametrize("device", devices())
+def test_per_wavelength_fft_engines_fill_one_output(device: str, rng) -> None:
+    be = get_backend(device, "double")
+    prop = FocalPlanePropagator(
+        32, 0.1, [1.0, 1.5, 2.0], 1.0 / (0.1 * 80), 24, method="fft", backend=be
+    )
+    u = be.asarray(_cplx(rng, (2, 3, 32, 32)))
+    v = be.asarray(_cplx(rng, (2, 3, 24, 24)))
+    forward, adjoint = prop.forward(u), prop.adjoint(v)
+    assert forward.shape == (2, 3, 24, 24) and adjoint.shape == (2, 3, 32, 32)
+    for i, engine in enumerate(prop._engines):
+        np.testing.assert_array_equal(to_numpy(forward[:, i]), to_numpy(engine.forward(u[:, i])))
+        np.testing.assert_array_equal(to_numpy(adjoint[:, i]), to_numpy(engine.adjoint(v[:, i])))
+    assert _adjoint_gap(prop, rng, lead=(2, 3)) < 1e-12

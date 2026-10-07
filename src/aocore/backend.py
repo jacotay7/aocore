@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, Literal, Union
 
@@ -71,6 +72,62 @@ def _cpu_workers(size: int = 1 << 30) -> int:
     if env:
         return max(1, int(env))
     return max(1, min(os.cpu_count() or 1, size >> 14))
+
+
+_scratch = threading.local()
+
+
+def _workspace(name: str, shape: tuple[int, ...], dtype: Any) -> np.ndarray:
+    """A reusable host array of this thread (contents left from its last use).
+
+    Large fresh arrays are new pages from the kernel: glibc returns freed
+    blocks above its mmap threshold to the OS, and writing to the new ones
+    costs a page fault per 4 KiB, which took as long as the FFT itself on an
+    Arm server. A few arrays (up to 64 MiB each) are kept per thread.
+    """
+    buffers: dict[tuple[Any, ...], np.ndarray] | None = getattr(_scratch, "buffers", None)
+    if buffers is None:
+        buffers = _scratch.buffers = {}
+    key = (name, shape, np.dtype(dtype).str)
+    array = buffers.pop(key, None)
+    if array is None:
+        array = np.empty(shape, dtype=dtype)
+        if array.nbytes > 64 * 2**20:
+            return array
+        while len(buffers) >= 6:
+            buffers.pop(next(iter(buffers)))  # least recently used
+    buffers[key] = array
+    return array
+
+
+def _line_bunches(lines: int, size: int) -> int:
+    """``lines`` rounded up to a multiple of 16, at most ``size``.
+
+    SciPy's FFTs transform lines in SIMD bunches (16 lines in ducc) and finish
+    a remainder with code that can round differently, so a pruned pass over
+    whole bunches keeps each line on the path the full transform takes.
+    """
+    return min(size, -(-lines // 16) * 16)
+
+
+@functools.lru_cache(maxsize=1)
+def _fft2_first_axis() -> int:
+    """The axis SciPy's out-of-place ``fft2`` transforms first: -1 or -2.
+
+    It depends on the SciPy version (pocketfft up to 1.17 follows ``axes``,
+    ducc from 1.18 starts with the last axis), and the two orders round
+    differently, so it is found once by comparing with explicit passes.
+    """
+    from scipy import fft
+
+    rng = np.random.default_rng(0)
+    probe = rng.standard_normal((48, 40)) + 1j * rng.standard_normal((48, 40))
+    reference = fft.fft2(probe, workers=1)
+    for axis in (-1, -2):
+        passes = fft.fft(fft.fft(probe, axis=axis, workers=1), axis=-3 - axis, workers=1)
+        if np.array_equal(passes, reference):
+            return axis
+    return -1  # pragma: no cover - neither order reproduces fft2 exactly
 
 
 @functools.lru_cache(maxsize=1)
@@ -199,6 +256,124 @@ class Backend:
         from scipy import fft
 
         return fft.ifft2(array, axes=axes, norm="ortho", workers=_cpu_workers(array.size))
+
+    def padded_fft2(
+        self,
+        array: Any,
+        shape: tuple[int, int],
+        out_shape: tuple[int, int] | None = None,
+        *,
+        inverse: bool = False,
+        weights: Any = None,
+        out_weights: Any = None,
+        out: Any = None,
+    ) -> Any:
+        """Unitary 2-D FFT of a zero-padded block, cropped to a corner.
+
+        Returns ``fft2(grid)[..., :my, :mx] * out_weights`` (``ifft2`` when
+        ``inverse``; ``out_weights`` defaults to 1) in working precision, where
+        ``grid`` is a zero ``(..., *shape)`` array holding ``array * weights``
+        (or ``array``) in its leading ``(ny, nx)`` corner and
+        ``(my, mx) = out_shape`` (default ``shape``). The result is written to
+        ``out`` when given.
+
+        On the CPU the transform skips what the crop and the padding make
+        redundant. A 2-D FFT is a pass of 1-D transforms along one axis, then
+        the other; lines of zeros transform to zeros, so the first pass runs
+        only over the lines that hold data (the ``ny`` rows when it runs along
+        the last axis) and the second only over the lines that are kept (the
+        ``mx`` columns). A half-filled grid cropped to half its width costs
+        about half the FFT work and memory traffic, and the work arrays are
+        reused between calls. Every value is computed by the same two 1-D
+        passes, in the same order and with the unitary scale applied in the
+        first, as :meth:`fft2` computes it; the results are bit-identical
+        unless the full transform's thread partition puts a needed line in a
+        short SIMD remainder group, where a value may differ in the last bit.
+        On the GPU it is the full transform followed by the crop.
+        """
+        ny, nx = array.shape[-2:]
+        big_y, big_x = (int(v) for v in shape)
+        my, mx = (big_y, big_x) if out_shape is None else (int(v) for v in out_shape)
+        if not (ny <= big_y and nx <= big_x and my <= big_y and mx <= big_x):
+            raise ValueError(
+                f"block {(ny, nx)} and crop {(my, mx)} must fit in the FFT grid {(big_y, big_x)}"
+            )
+        lead = array.shape[:-2]
+        if weights is not None:
+            lead = np.broadcast_shapes(lead, weights.shape[:-2])
+        cdt = self.complex_dtype
+        rows, cols = _line_bunches(ny, big_y), _line_bunches(mx, big_x)
+        first_axis = _fft2_first_axis() if not self.is_gpu else -1
+        if first_axis == -2:
+            rows, cols = _line_bunches(my, big_y), _line_bunches(nx, big_x)
+        if self.is_gpu or (rows == big_y and cols == big_x):
+            grid = self.xp.zeros((*lead, big_y, big_x), dtype=cdt)
+            self._fill(grid[..., :ny, :nx], array, weights)
+            spectrum = self.ifft2(grid) if inverse else self.fft2(grid)
+            return self._crop(spectrum[..., :my, :mx], out_weights, out, copy=False)
+        from scipy import fft
+
+        transform = fft.ifft if inverse else fft.fft
+        # Pass order and scaling follow fft2 (see _fft2_first_axis): the
+        # whole norm="ortho" factor 1 / sqrt(big_y * big_x), computed in long
+        # double, is applied in the first pass. For a square grid that is the
+        # 1-D "forward" (inverse: "backward") norm; otherwise it is applied
+        # here, the same multiplication SciPy does after the unscaled pass.
+        square = big_y == big_x
+        unscaled = "forward" if inverse else "backward"
+        if first_axis == -1:
+            # Rows first: only the `rows` rows holding data, then only the
+            # `cols` columns that are kept.
+            first = _workspace("padded_fft2 a", (*lead, rows, big_x), cdt)
+        else:
+            # Columns first: only the `cols` columns holding data, then only
+            # the `rows` rows that are kept.
+            first = _workspace("padded_fft2 a", (*lead, big_y, cols), cdt)
+        self._fill(first[..., :ny, :nx], array, weights)
+        first[..., :ny, nx:] = 0
+        first[..., ny:, :] = 0
+        first = transform(
+            first,
+            axis=first_axis,
+            norm=("backward" if inverse else "forward") if square else unscaled,
+            overwrite_x=True,
+            workers=_cpu_workers(first.size),
+        )
+        if not square:
+            factor = 1 / np.sqrt(np.longdouble(big_y) * np.longdouble(big_x))
+            first.view(self.real_dtype)[...] *= factor.astype(self.real_dtype)
+        if first_axis == -1:
+            second = _workspace("padded_fft2 b", (*lead, big_y, cols), cdt)
+            second[..., :rows, :] = first[..., :cols]
+            second[..., rows:, :] = 0
+        else:
+            second = _workspace("padded_fft2 b", (*lead, rows, big_x), cdt)
+            second[..., :cols] = first[..., :rows, :]
+            second[..., cols:] = 0
+        second = transform(
+            second,
+            axis=-3 - first_axis,
+            norm=unscaled,
+            overwrite_x=True,
+            workers=_cpu_workers(second.size),
+        )
+        return self._crop(second[..., :my, :mx], out_weights, out, copy=True)
+
+    def _fill(self, target: Any, array: Any, weights: Any) -> None:
+        """Write ``array`` (times ``weights``) into the view ``target``."""
+        if weights is None:
+            target[...] = array
+        else:
+            self.xp.multiply(array, weights, out=target)
+
+    def _crop(self, crop: Any, weights: Any, out: Any, *, copy: bool) -> Any:
+        """``crop * weights`` into ``out``; ``crop`` is copied if it is scratch space."""
+        if weights is not None:
+            return self.xp.multiply(crop, weights, out=out)
+        if out is not None:
+            out[...] = crop
+            return out
+        return crop.copy() if copy else crop
 
     def rfft2(self, array: Any, *, axes: tuple[int, int] = (-2, -1)) -> Any:
         """Unnormalized real-input 2-D FFT (used for convolutions)."""
