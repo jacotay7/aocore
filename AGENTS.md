@@ -32,7 +32,8 @@ src/aocore/metrics.py     rms (+ rms_unweighted, rms_tiptilt_removed), remove_mo
 src/aocore/unwrap.py      weighted least-squares phase unwrapping
 src/aocore/sampling.py    block_sum, block_mean
 tests/                    pytest, including conformance self-checks
-benchmarks/               timing scripts (python benchmarks/bench_block_sum.py [--gpu])
+benchmarks/               timing scripts (python benchmarks/bench_block_sum.py [--gpu]);
+                          results/ holds recorded runs on other hardware
 ```
 
 ## Quality gate
