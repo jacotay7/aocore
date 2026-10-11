@@ -4,6 +4,54 @@ All notable changes to `aocore` are documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-10
+
+Primitives for closed-loop studies, moved here from the dithered-pupil
+Shack-Hartmann study so packages stop re-implementing them (issue #7).
+Additive release: nothing existing changes behaviour, and the contract stays
+at v1.1 (CONVENTIONS 4.2 already named `strehl_peak`; it now has a reference
+implementation and a check).
+
+- **New: `Pupil.shifted(dx, dy, *, supersample=None)`**, the aperture
+  translated by a sub-pixel amount in metres (positive `dx` towards +x, larger
+  column index) on the same grid, with anti-aliased area fractions per pixel.
+  Pupils from the analytic constructors and presets are re-rendered from their
+  geometry, so spiders, gaps and segment labels move with the aperture
+  (whole-pixel shifts equal a roll exactly); other pupils are resampled as
+  piecewise-constant maps, which conserves the summed amplitude exactly. The
+  analytic constructors now build their maps through the same renderer; the
+  results are bit-identical to 0.1.4.
+- **New: `fourier_shift(array, dx, dy, *, backend=None)`**, a periodic
+  sub-pixel shift of the last two axes through the FFT, on NumPy or CuPy, in
+  pixels. Content moves towards +x for `dx > 0`, like an image under an OPD
+  ramp along +x (CONVENTIONS 1.1, 3.1); its adjoint is the opposite shift.
+- **New: `perfect_coronagraph_image(field_or_opd, pupil, propagator, *,
+  wavelength=None, normalize="peak")`** and **`perfect_coronagraph_field`**:
+  the ideal coronagraph of Cavarroc et al. (2006), which removes each frame's
+  coherent field (its projection on the pupil amplitude). Images come from
+  any aocore propagator, per wavelength for a `FocalPlanePropagator`, in raw
+  contrast (`"peak"`: over the unaberrated peak), PSF units (`"flux"`) or
+  unnormalized. A flat wavefront gives exactly zero.
+- **New: `azimuthal_profile(image, center=None, bin_width=1.0, *,
+  pixel_scale=1.0, max_radius=None)`**, mean values in annuli about the
+  optical axis (or any centre) for contrast curves, in pixels or, through
+  `pixel_scale`, lambda/D or arcseconds; batched over frames, on either
+  device.
+- **New: `strehl_peak(image, reference, *, normalize=False)`**, the measured
+  Strehl of CONVENTIONS 4.2 (image peak over the unaberrated image's peak),
+  and **`conformance.check_strehl_peak`**, which catches on-axis readings,
+  renormalized images and ratios without a reference.
+- **New: `set_threads(n)`**, a function and context manager that sets the
+  BLAS, OpenMP, aocore FFT/BLAS and Numba thread counts in one call: loaded
+  libraries through threadpoolctl, `AOCORE_FFT_WORKERS` /
+  `AOCORE_BLAS_THREADS`, `numba.set_num_threads` when Numba is already
+  imported (Numba stays optional), and the environment variables for
+  libraries loaded later and child processes. Use it as a worker initializer
+  in multiprocessing sweeps; the new "Threads and multiprocessing" docs page
+  explains the import-order pitfalls (variables set after NumPy is imported
+  have no effect; changing `NUMBA_NUM_THREADS` after Numba starts breaks its
+  compiler).
+
 ## [0.1.4] - 2026-10-07
 
 Faster propagators on CPU and GPU; results are unchanged up to last-bit

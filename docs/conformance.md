@@ -22,6 +22,7 @@ centre.
 | `check_point_source_flux` | 3.3 normalization, for analytic images | getframes |
 | `check_edge_flux_loss` | 3.3 no renormalization of clipped light | getframes, makewfs |
 | `check_rms` | 4.1 RMS definition | every package that reports RMS |
+| `check_strehl_peak` | 4.2 measured Strehl (peak ratio) | every package that reports a measured Strehl |
 | `check_zernike_basis` | 5.1, 5.2 Noll basis | aobasis, shmpipeline-ao |
 | `check_wind_motion` | 6.1 frozen flow | pyturb |
 | `check_slope_sign` | 7.1, 7.2 slopes | shmpipeline-ao, pyRTC, shmpipeline |

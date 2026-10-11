@@ -261,3 +261,27 @@ def test_edge_flux_loss_asymmetric_psf_and_errors() -> None:
         cf.check_edge_flux_loss(lambda s, p: np.zeros(s))
     with pytest.raises(ValueError, match="pad"):
         cf.check_edge_flux_loss(lambda s, p: _gaussian(s, p), pad=0)
+
+
+def test_strehl_peak_catches_on_axis_renormalized_and_unreferenced_ratios() -> None:
+    import aocore as ac
+
+    found = cf.check_strehl_peak(ac.strehl_peak)
+    assert 0.5 < found["strehl"] < 1.0
+    cf.check_strehl_peak(lambda image, reference: float(image.max() / reference.max()))
+
+    def on_axis(image: np.ndarray, reference: np.ndarray) -> float:
+        c = image.shape[0] // 2
+        return float(image[c - 1 : c + 1, c - 1 : c + 1].max() / reference.max())
+
+    def renormalized(image: np.ndarray, reference: np.ndarray) -> float:
+        return float((image / image.sum()).max() / (reference / reference.sum()).max())
+
+    for violation in (
+        on_axis,
+        renormalized,
+        lambda image, reference: float(image.max()),  # assumes a normalized image
+        lambda image, reference: float(image.max() / image.max()),  # own peak
+    ):
+        with pytest.raises(cf.ConformanceError, match=r"4\.2"):
+            cf.check_strehl_peak(violation)

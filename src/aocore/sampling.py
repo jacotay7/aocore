@@ -1,4 +1,4 @@
-"""Flux-conserving resampling helpers."""
+"""Resampling helpers: flux-conserving binning and sub-pixel shifts."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from typing import Any
 
 import numpy as np
 
-from .backend import _cupy
+from .backend import BackendLike, _cupy, backend_of, get_backend
 
-__all__ = ["block_mean", "block_sum"]
+__all__ = ["block_mean", "block_sum", "fourier_shift"]
 
 #: Largest per-axis factor that NumPy sums by strided adds rather than a
 #: single-axis reduction (measured in benchmarks/bench_block_sum.py).
@@ -129,3 +129,60 @@ def block_mean(array: Any, factor: int | tuple[int, int]) -> Any:
     """
     fy, fx = _factors(factor)
     return block_sum(array, (fy, fx)) / (fy * fx)
+
+
+def fourier_shift(array: Any, dx: float, dy: float, *, backend: BackendLike = None) -> Any:
+    """Shift the last two axes by ``(dx, dy)`` pixels, periodically, through the FFT.
+
+    The content moves towards +x (larger column index) for ``dx > 0`` and
+    towards +y (larger row index) for ``dy > 0``, the frame of CONVENTIONS
+    1.1 and 3.1: ``out(x, y) = a(x - dx, y - dy)`` on the periodic grid, so
+    an image shifted this way moves like one whose pupil OPD gained a ramp
+    along +x. Each spatial frequency ``(kx, ky)`` (cycles per pixel) is
+    multiplied by ``exp(-2 pi i (kx dx + ky dy))``. Whole-pixel shifts equal
+    :func:`numpy.roll` up to rounding; fractional ones are band-limited
+    (trigonometric) interpolation, and anything pushed past an edge
+    re-enters on the other side, so pad non-periodic data first.
+
+    Parameters
+    ----------
+    array:
+        ``(..., ny, nx)`` real or complex NumPy or CuPy array; leading axes
+        are frames, all shifted alike.
+    dx, dy:
+        Shift in pixels along x (columns) and y (rows); need not be whole.
+    backend:
+        Where to compute (a :class:`~aocore.Backend` or device name). By
+        default the array's own device, in single precision for float32 or
+        complex64 input and double otherwise.
+
+    Returns
+    -------
+    The shifted array on the backend's device, in its working precision:
+    complex for complex input and real for real input. For real input the
+    result is the real part of the complex shift, which only matters at the
+    Nyquist frequency of an even-length axis.
+
+    Notes
+    -----
+    The operator is unitary for complex input and its adjoint, for real and
+    complex input alike, is ``fourier_shift(., -dx, -dy)``.
+    """
+    be = backend_of(array) if backend is None else get_backend(backend)
+    xp = be.xp
+    data = be.asarray(array)
+    if data.ndim < 2:
+        raise ValueError(f"fourier_shift needs at least 2 dimensions, got shape {data.shape}")
+    dx, dy = float(dx), float(dy)
+    if not (np.isfinite(dx) and np.isfinite(dy)):
+        raise ValueError(f"shift must be finite, got ({dx}, {dy})")
+    ny, nx = data.shape[-2:]
+    # The kernel is built in float64 on the host (it is separable and small),
+    # then cast, so single and double precision use the same phases.
+    ramp_y = np.exp(-2j * np.pi * np.fft.fftfreq(ny) * dy)
+    ramp_x = np.exp(-2j * np.pi * np.fft.fftfreq(nx) * dx)
+    kernel = be.asarray(np.outer(ramp_y, ramp_x), dtype="complex")
+    shifted = be.ifft2(be.fft2(data) * kernel)
+    if data.dtype.kind == "c":
+        return shifted
+    return xp.ascontiguousarray(shifted.real)

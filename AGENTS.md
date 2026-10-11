@@ -23,14 +23,16 @@ shmpipeline-ao and pyRTC.
 
 ```text
 CONVENTIONS.md            the contract (versioned; see "Changing a convention")
-src/aocore/conventions.py reference definitions (coordinates, units, RMS)
+src/aocore/conventions.py reference definitions (coordinates, units, RMS, strehl_peak)
 src/aocore/conformance.py check_* functions run by every package
 src/aocore/backend.py     Backend (NumPy | CuPy, single | double)
 src/aocore/propagation.py FFT/MFT/focal-plane/angular-spectrum propagators (exact adjoints)
-src/aocore/pupil.py       Pupil: circular, segmented, presets
+src/aocore/pupil.py       Pupil: circular, segmented, presets, shifted
 src/aocore/metrics.py     rms (+ rms_unweighted, rms_tiptilt_removed), remove_modes, wavefront_error, strehl
+src/aocore/contrast.py    perfect coronagraph (field, image), azimuthal_profile
 src/aocore/unwrap.py      weighted least-squares phase unwrapping
-src/aocore/sampling.py    block_sum, block_mean
+src/aocore/sampling.py    block_sum, block_mean, fourier_shift
+src/aocore/threads.py     set_threads: BLAS/OpenMP/FFT/Numba thread counts in one call
 tests/                    pytest, including conformance self-checks
 benchmarks/               timing scripts (python benchmarks/bench_block_sum.py [--gpu],
                           bench_propagation.py [--gpu]); results/ holds recorded runs
@@ -98,3 +100,22 @@ Never loosen a check to make a package pass. Fix the package instead.
   for each; re-run `benchmarks/bench_block_sum.py --gpu` before changing it.
 - `conformance.check_point_source_centring` needs an even window: for odd
   `n` the `fftshift` axis `n // 2` equals `(n - 1) / 2`.
+- Analytic pupils keep their geometry (`Pupil._geometry`, a renderer taking
+  the grid size and a shift) so `Pupil.shifted` can re-render them. It is not
+  a dataclass field, so `dataclasses.replace` drops it; constructors and
+  `padded` re-attach it with `_with_geometry`. A new constructor must render
+  through its renderer at zero shift, so that `shifted` and the constructor
+  agree bit for bit.
+- Never change `NUMBA_NUM_THREADS` once Numba is imported: after its threads
+  start, the next compilation raises `RuntimeError` ("Cannot set
+  NUMBA_NUM_THREADS to a different value once the threads have been
+  launched"). `set_threads` uses `numba.set_num_threads` then, and keeps the
+  variable on exit if Numba was imported inside the block. Thread variables
+  set after NumPy is imported do not reach the BLAS it loaded; only
+  threadpoolctl does.
+- `test_gpu_mft_expanded_matrices_are_bitwise_identical[single]` fails on a
+  Quadro P620 (Pascal): there the expanded and broadcast single-precision
+  cuBLAS products differ in the last bit (half the elements, ~4e-7). The
+  bit-identity of 0.1.4 was measured on an RTX 4060. The GPU suite also
+  needs a few hundred MiB free, which a desktop session on the 2 GiB P620
+  may not leave (CuPy then raises `OutOfMemoryError`).

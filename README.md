@@ -18,13 +18,20 @@ slopes. aocore makes sure they mean the same thing by them:
   package runs against its own implementation in its test suite.
 - **The primitives themselves**, implemented once:
   - a NumPy/CuPy array backend;
-  - anti-aliased and segmented pupils with telescope presets;
+  - anti-aliased and segmented pupils with telescope presets, and sub-pixel
+    translated copies of them (`Pupil.shifted`) for pupil-shift and
+    misregistration studies;
   - FFT, matrix-Fourier, focal-plane and angular-spectrum propagators with
     exact adjoints;
-  - wavefront metrics (`rms`, `rms_unweighted`, `rms_tiptilt_removed`),
-    least-squares phase unwrapping, fast pixel binning (`block_sum`,
-    `block_mean`), coordinate grids built on either device, and unit
-    constants.
+  - wavefront metrics (`rms`, `rms_unweighted`, `rms_tiptilt_removed`) and
+    the measured Strehl ratio (`strehl_peak`);
+  - perfect-coronagraph images and azimuthal profiles for contrast curves
+    (`perfect_coronagraph_image`, `azimuthal_profile`);
+  - least-squares phase unwrapping, fast pixel binning (`block_sum`,
+    `block_mean`), periodic sub-pixel shifts (`fourier_shift`), coordinate
+    grids built on either device, and unit constants;
+  - `set_threads`, one switch for the BLAS, OpenMP, FFT and Numba thread
+    pools, for multiprocessing sweeps.
 
 ```bash
 pip install aocore              # CPU
@@ -40,6 +47,10 @@ print(ac.rms(opd, pupil))  # CONVENTIONS 4.1: weighted, piston removed
 print(ac.rms_unweighted(opd, pupil.mask))  # plain quadratic mean, piston included
 print(ac.rms_tiptilt_removed(opd, pupil))  # weighted, piston/tip/tilt removed
 y, x = ac.coordinate_grid(pupil.shape, pupil.pitch, backend="auto", dtype="float32")
+
+# Raw contrast behind a perfect coronagraph, and its azimuthal profile in lambda/D.
+halo = ac.perfect_coronagraph_image(opd, pupil, prop)[0]
+radii, contrast = ac.azimuthal_profile(halo, pixel_scale=1 / 2)  # 2 pixels per lambda/D
 
 # In any package's tests:
 from aocore import conformance
