@@ -10,6 +10,10 @@
 
 ::: aocore.metrics
 
+::: aocore.contrast
+
 ::: aocore.unwrap
 
 ::: aocore.sampling
+
+::: aocore.threads

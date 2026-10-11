@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -27,6 +27,9 @@ from .sampling import block_mean
 __all__ = ["Pupil"]
 
 MaskFunction = Callable[[np.ndarray, np.ndarray], np.ndarray]
+#: ``render(n, shift_y, shift_x, supersample) -> (amplitude, labels or None)``:
+#: an analytic pupil on an ``n x n`` grid, translated by ``(shift_y, shift_x)`` metres.
+Renderer = Callable[[int, float, float, int], tuple[np.ndarray, "np.ndarray | None"]]
 
 
 def _supersampled(n: int, pitch: float, inside: MaskFunction, supersample: int) -> np.ndarray:
@@ -123,6 +126,14 @@ class Pupil:
         each segment of a segmented aperture.
     name:
         A short descriptive label.
+
+    Notes
+    -----
+    Pupils made by the analytic constructors (:meth:`circular`,
+    :meth:`segmented_hexagonal` and the presets) remember their geometry, so
+    :meth:`shifted` re-renders the translated aperture exactly. The geometry
+    survives :meth:`padded` but not :meth:`with_amplitude`,
+    :meth:`downsampled` or :func:`dataclasses.replace`.
     """
 
     amplitude: np.ndarray
@@ -131,6 +142,10 @@ class Pupil:
     obscuration: float = 0.0
     segments: np.ndarray | None = field(default=None)
     name: str = "custom"
+
+    # The analytic geometry, set by the constructors (see Notes); not a field,
+    # so dataclasses.replace() drops it.
+    _geometry: ClassVar[tuple[Renderer, int] | None] = None
 
     def __post_init__(self) -> None:
         amp = np.asarray(self.amplitude, dtype=np.float64)
@@ -220,6 +235,63 @@ class Pupil:
         if self.segments is not None:
             seg = np.zeros((n, n), dtype=np.int64)
             seg[py : py + ny, px : px + nx] = self.segments
+        # Centred padding keeps the pitch and the optical axis, so the analytic
+        # geometry still describes the padded grid.
+        return _with_geometry(replace(self, amplitude=amp, segments=seg), self._geometry)
+
+    def shifted(self, dx: float, dy: float, *, supersample: int | None = None) -> Pupil:
+        """The aperture translated by ``(dx, dy)`` metres on the same grid.
+
+        A positive ``dx`` moves the aperture towards +x (larger column index)
+        and a positive ``dy`` towards +y (larger row index), as in CONVENTIONS
+        1.1: the returned amplitude is ``a(x - dx, y - dy)``. Shifts need not
+        be whole pixels (``dx / pitch`` pixels).
+
+        Only the transmission map moves; the grid, :attr:`pitch`,
+        :attr:`diameter` and therefore :meth:`coordinates` stay where they
+        were. That is what pupil-shift, dither and misregistration studies
+        need: the OPD (or DM) frame is fixed and the mask moves across it.
+
+        Each pixel holds the fraction of its area that transmits (with
+        :attr:`segments` relabelled to match):
+
+        * pupils from the analytic constructors are re-rendered from their
+          geometry with ``supersample^2`` points per pixel (default: the
+          constructor's), so the edges are anti-aliased as well as an
+          unshifted pupil's and spiders, gaps and segments move with it;
+        * other pupils (:meth:`from_array`, :meth:`with_amplitude`,
+          :meth:`downsampled`) are resampled as piecewise-constant maps: each
+          pixel averages the amplitude it overlaps after the shift. This
+          conserves ``sum(amplitude)`` exactly but widens grey edges by up to
+          one pixel; ``supersample`` is ignored.
+
+        Light moved beyond the grid is lost, not wrapped. A zero shift
+        returns the pupil unchanged.
+        """
+        dx, dy = float(dx), float(dy)
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            raise ValueError(f"shift must be finite, got ({dx}, {dy})")
+        if dx == 0.0 and dy == 0.0:
+            return self
+        geometry = self._geometry
+        ny, nx = self.shape
+        if geometry is not None and ny == nx:
+            render, default_supersample = geometry
+            amp, labels = render(ny, dy, dx, supersample or default_supersample)
+            shifted = replace(self, amplitude=amp, segments=labels)
+            return _with_geometry(shifted, geometry)
+        sy, sx = dy / self.pitch, dx / self.pitch
+        amp = _box_shift(self.amplitude, sy, sx)
+        seg = None
+        if self.segments is not None:
+            # Each pixel takes the segment that contributes the most light.
+            weights = np.stack(
+                [
+                    _box_shift(np.where(self.segments == s, self.amplitude, 0.0), sy, sx)
+                    for s in range(1, self.n_segments + 1)
+                ]
+            )
+            seg = np.where(amp > 0, np.argmax(weights, axis=0) + 1, 0).astype(np.int64)
         return replace(self, amplitude=amp, segments=seg)
 
     def downsampled(self, factor: int) -> Pupil:
@@ -319,9 +391,18 @@ class Pupil:
                 ok &= ~vanes(y, x)
             return ok
 
-        amp = _supersampled(n, pitch, inside, supersample)
+        def render(
+            size: int, shift_y: float, shift_x: float, samples: int
+        ) -> tuple[np.ndarray, np.ndarray | None]:
+            def moved(y: np.ndarray, x: np.ndarray) -> np.ndarray:
+                return inside(y - shift_y, x - shift_x)
+
+            return _supersampled(size, pitch, moved, samples), None
+
+        amp, _ = render(n, 0.0, 0.0, supersample)
         label = name or ("annular" if obscuration else "circular")
-        return cls(amp, pitch=pitch, diameter=diameter, obscuration=obscuration, name=label)
+        pupil = cls(amp, pitch=pitch, diameter=diameter, obscuration=obscuration, name=label)
+        return _with_geometry(pupil, (render, supersample))
 
     @classmethod
     def segmented_hexagonal(
@@ -384,21 +465,30 @@ class Pupil:
                 out |= vanes(y, x)
             return out
 
-        amp: np.ndarray = np.zeros((n, n))
-        labels = np.zeros((n, n), dtype=np.int64)
-        coords = centered_coordinates(n, pitch)
-        for index, (_, sx, sy) in enumerate(sites, start=1):
+        def render(
+            size: int, shift_y: float, shift_x: float, samples: int
+        ) -> tuple[np.ndarray, np.ndarray | None]:
+            amp: np.ndarray = np.zeros((size, size))
+            labels = np.zeros((size, size), dtype=np.int64)
+            coords = centered_coordinates(size, pitch)
+            for index, (_, sx, sy) in enumerate(sites, start=1):
+                cx, cy = sx + shift_x, sy + shift_y
 
-            def inside(y: np.ndarray, x: np.ndarray, sx: float = sx, sy: float = sy) -> np.ndarray:
-                return hexagon(y - sy, x - sx) & ~blocked(y, x)
+                def inside(
+                    y: np.ndarray, x: np.ndarray, cx: float = cx, cy: float = cy
+                ) -> np.ndarray:
+                    return hexagon(y - cy, x - cx) & ~blocked(y - shift_y, x - shift_x)
 
-            part = _supersampled(n, pitch, inside, supersample)
-            amp += part
-            centre = hexagon(coords[:, None] - sy, coords[None, :] - sx)
-            labels[(part > 0) & ((labels == 0) | centre)] = index
-        amp = np.clip(amp, 0.0, 1.0)
-        labels[amp <= 0] = 0
-        return cls(
+                part = _supersampled(size, pitch, inside, samples)
+                amp += part
+                centre = hexagon(coords[:, None] - cy, coords[None, :] - cx)
+                labels[(part > 0) & ((labels == 0) | centre)] = index
+            amp = np.clip(amp, 0.0, 1.0)
+            labels[amp <= 0] = 0
+            return amp, labels
+
+        amp, labels = render(n, 0.0, 0.0, supersample)
+        pupil = cls(
             amp,
             pitch=pitch,
             diameter=diameter,
@@ -406,6 +496,7 @@ class Pupil:
             segments=labels,
             name=name,
         )
+        return _with_geometry(pupil, (render, supersample))
 
     # ----------------------------------------------------- telescope presets
     @classmethod
@@ -436,7 +527,8 @@ class Pupil:
             name="keck",
         )
         # Report the conventional 10.95 m diameter (it sets lambda/D).
-        return replace(pupil, diameter=10.95, obscuration=2.5746 / 10.95)
+        conventional = replace(pupil, diameter=10.95, obscuration=2.5746 / 10.95)
+        return _with_geometry(conventional, pupil._geometry)
 
     @classmethod
     def jwst(cls, n: int = 256, *, supersample: int = 4) -> Pupil:
@@ -486,6 +578,47 @@ class Pupil:
             supersample=supersample,
             name="hst",
         )
+
+
+def _with_geometry(pupil: Pupil, geometry: tuple[Renderer, int] | None) -> Pupil:
+    """Attach (or keep) the analytic geometry that :meth:`Pupil.shifted` re-renders."""
+    if geometry is not None:
+        object.__setattr__(pupil, "_geometry", geometry)
+    return pupil
+
+
+def _shift_whole(array: np.ndarray, pixels: int, axis: int) -> np.ndarray:
+    """``array`` moved by a whole number of pixels along ``axis``, zero-filled."""
+    out = np.zeros_like(array)
+    n = array.shape[axis]
+    if abs(pixels) >= n:
+        return out
+    src: list[slice] = [slice(None)] * array.ndim
+    dst: list[slice] = [slice(None)] * array.ndim
+    if pixels >= 0:
+        src[axis], dst[axis] = slice(0, n - pixels), slice(pixels, n)
+    else:
+        src[axis], dst[axis] = slice(-pixels, n), slice(0, n + pixels)
+    out[tuple(dst)] = array[tuple(src)]
+    return out
+
+
+def _box_shift(array: np.ndarray, shift_y: float, shift_x: float) -> np.ndarray:
+    """Piecewise-constant map moved by ``(shift_y, shift_x)`` pixels (area-weighted).
+
+    Output pixel ``i`` averages the input over ``[i - s - 1/2, i - s + 1/2]``:
+    with ``s = k + f`` (``k`` whole, ``0 <= f < 1``) that is
+    ``(1 - f) a[i - k] + f a[i - k - 1]`` along each axis.
+    """
+    out = np.asarray(array, dtype=np.float64)
+    for axis, shift in ((0, shift_y), (1, shift_x)):
+        whole = math.floor(shift)
+        frac = shift - whole
+        moved = _shift_whole(out, whole, axis)
+        if frac:
+            moved = (1.0 - frac) * moved + frac * _shift_whole(out, whole + 1, axis)
+        out = moved
+    return out
 
 
 def _illuminated_extent(amp: np.ndarray) -> float:

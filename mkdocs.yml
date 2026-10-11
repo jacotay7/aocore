@@ -10,6 +10,7 @@ nav:
   - Home: index.md
   - Conventions: conventions.md
   - Conformance checks: conformance.md
+  - Threads and multiprocessing: threads.md
   - API reference: api.md
   - Changelog: changelog.md
 plugins:

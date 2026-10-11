@@ -31,7 +31,7 @@ from typing import Any
 
 import numpy as np
 
-from .conventions import centroid, coordinate_grid, rms
+from .conventions import centroid, coordinate_grid, rms, strehl_peak
 
 __all__ = [
     "ConformanceError",
@@ -42,6 +42,7 @@ __all__ = [
     "check_point_source_flux",
     "check_rms",
     "check_slope_sign",
+    "check_strehl_peak",
     "check_tilt_direction",
     "check_unit_flux",
     "check_wind_motion",
@@ -328,6 +329,54 @@ def check_rms(
             f"rms is {got:.6g} m; the intensity-weighted piston-removed value is {expected:.6g} m",
         )
     return {"rms": got}
+
+
+def _fraunhofer_image(opd_waves: np.ndarray, amplitude: np.ndarray, pad: int, window: int) -> Any:
+    """Unitary Fraunhofer image of ``amplitude exp(2 pi i opd)``, cropped to ``window``.
+
+    The optical axis is put at ``(window - 1) / 2`` (rule 1.3) with a half-pixel
+    input ramp.
+    """
+    n = amplitude.shape[0]
+    big = pad * n
+    i = np.arange(n)
+    ramp = np.exp(-1j * np.pi * (i[:, None] + i[None, :]) / big)
+    field = np.zeros((big, big), complex)
+    field[:n, :n] = amplitude * np.exp(2j * np.pi * opd_waves) * ramp
+    image = np.abs(np.fft.fftshift(np.fft.fft2(field, norm="ortho"))) ** 2
+    start = (big - window) // 2
+    return image[start : start + window, start : start + window]
+
+
+def check_strehl_peak(
+    strehl_fn: Callable[[np.ndarray, np.ndarray], float], *, rel_tol: float = 1e-6
+) -> dict[str, float]:
+    """Rule 4.2: ``strehl_fn(image, reference)`` is the peak ratio ``max(image) / max(reference)``.
+
+    ``reference`` is the unaberrated image under the same sampling and
+    normalization. The aberrated test image is tilted by a few pixels, so
+    reading the on-axis pixel fails; it loses more light outside the window
+    than the reference, so renormalizing either image to unit sum fails; and
+    both images carry the same arbitrary flux, so a function that assumes a
+    normalized image (or divides each image by its own peak) fails too.
+    """
+    n, pad, window = 32, 4, 24
+    y, x = coordinate_grid((n, n), 2.0 / n)
+    amplitude = (np.hypot(x, y) <= 1.0).astype(np.float64)
+    # 2.5 pixels of tilt along +x, and some astigmatism (in waves).
+    aberration = 2.5 / pad * (x / 2.0) + 0.06 * math.sqrt(6) * (x**2 - y**2)
+    flux = 1234.5
+    reference = flux * _fraunhofer_image(np.zeros((n, n)), amplitude, pad, window)
+    image = flux * _fraunhofer_image(aberration, amplitude, pad, window)
+    expected = strehl_peak(image, reference)
+    got = float(strehl_fn(image, reference))
+    if not abs(got - expected) <= rel_tol * expected:
+        _fail(
+            "4.2",
+            f"the measured Strehl is {got:.6g}; the image peak over the unaberrated peak is "
+            f"{expected:.6g} (no renormalization, the brightest pixel wherever it lies)",
+        )
+    return {"strehl": got}
 
 
 # ------------------------------------------------------------------ section 5

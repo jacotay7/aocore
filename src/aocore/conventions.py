@@ -11,7 +11,7 @@ from typing import Any
 
 import numpy as np
 
-from .backend import BackendLike, get_backend
+from .backend import BackendLike, _cupy, get_backend
 
 __all__ = [
     "ARCSEC_TO_RAD",
@@ -23,6 +23,7 @@ __all__ = [
     "phase_to_opd",
     "rms",
     "strehl_marechal",
+    "strehl_peak",
 ]
 
 #: Radians per arcsecond (CONVENTIONS 2.3).
@@ -130,3 +131,51 @@ def rms(opd: Any, amplitude: Any) -> float:
 def strehl_marechal(rms_opd: float, wavelength: float) -> float:
     """Maréchal approximation ``exp(-(2 pi rms / lambda)^2)`` (CONVENTIONS 4.2)."""
     return float(math.exp(-((2.0 * math.pi * rms_opd / wavelength) ** 2)))
+
+
+def strehl_peak(image: Any, reference: Any, *, normalize: bool = False) -> Any:
+    """Measured Strehl ratio: the image peak over the unaberrated image's peak (CONVENTIONS 4.2).
+
+    ``max(image) / max(reference)``, where ``reference`` is the image of the
+    same pupil without aberrations, formed with the same sampling, window and
+    normalization (for example the same propagator applied to the bare pupil
+    amplitude). The peak is the brightest pixel wherever it lies, so a tilted
+    image is not penalized for its tilt beyond pixel phasing. Compare like
+    with like: a peak sampled more coarsely than Nyquist, or off a pixel
+    centre, reads low in both images.
+
+    Parameters
+    ----------
+    image:
+        ``(..., ny, nx)`` image(s), NumPy or CuPy; leading axes are frames
+        and each gets its own ratio.
+    reference:
+        The unaberrated image (any window shape that holds its peak, leading
+        axes broadcasting against ``image``'s), or its peak value as a
+        scalar.
+    normalize:
+        Divide each image, and the reference image, by its own sum first.
+        Use it only for images of unknown flux (detector frames) whose window
+        holds the same fraction of the light as the reference's; by default
+        nothing is renormalized (CONVENTIONS 3.3).
+
+    Returns
+    -------
+    A float for a single image, else an array of ratios (on the image's
+    device) with the leading shape.
+    """
+    cupy = _cupy()
+    on_gpu = cupy is not None and any(isinstance(a, cupy.ndarray) for a in (image, reference))
+    xp = cupy if on_gpu else np
+    data = xp.asarray(image, dtype=xp.float64)
+    ref = xp.asarray(reference, dtype=xp.float64)
+    if data.ndim < 2:
+        raise ValueError(f"image must be at least 2-D, got shape {data.shape}")
+    if normalize:
+        if ref.ndim < 2:
+            raise ValueError("normalize=True needs the reference image, not its peak")
+        data = data / xp.sum(data, axis=(-2, -1), keepdims=True)
+        ref = ref / xp.sum(ref, axis=(-2, -1), keepdims=True)
+    ref_peak = xp.max(ref, axis=(-2, -1)) if ref.ndim >= 2 else ref
+    ratio = xp.max(data, axis=(-2, -1)) / ref_peak
+    return float(ratio) if ratio.ndim == 0 else ratio
